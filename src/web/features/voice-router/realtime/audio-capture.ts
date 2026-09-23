@@ -16,7 +16,7 @@ export interface PcmCaptureOptions {
   workletUrl?: URL;
 }
 
-class StreamingPcm16Encoder {
+export class StreamingPcm16Encoder {
   readonly #sourceRate: number;
   readonly #targetRate: number;
   readonly #frameSamples: number;
@@ -56,7 +56,9 @@ class StreamingPcm16Encoder {
   }
 
   finish(): PcmCaptureStats {
-    this.#stats.droppedSamples += this.#pending.length;
+    const step = this.#sourceRate / this.#targetRate;
+    const unencodedSamples = Math.max(0, Math.ceil((this.#source.length - this.#position) / step));
+    this.#stats.droppedSamples += this.#pending.length + unencodedSamples;
     this.#pending = [];
     this.#source = new Float32Array(0);
     this.#position = 0;
@@ -66,8 +68,11 @@ class StreamingPcm16Encoder {
   #emitCompleteFrames(): void {
     while (this.#pending.length >= this.#frameSamples) {
       const samples = this.#pending.splice(0, this.#frameSamples);
-      const frame = Int16Array.from(samples);
-      const data = frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength);
+      const data = new ArrayBuffer(samples.length * 2);
+      const view = new DataView(data);
+      for (let index = 0; index < samples.length; index += 1) {
+        view.setInt16(index * 2, samples[index]!, true);
+      }
       this.#onFrame(data);
       this.#stats.emittedFrames += 1;
       this.#stats.emittedBytes += data.byteLength;
@@ -84,6 +89,7 @@ export class PcmMicrophoneCapture {
   #sink: GainNode | undefined;
   #encoder: StreamingPcm16Encoder | undefined;
   #starting: Promise<void> | undefined;
+  #generation = 0;
 
   constructor(options: PcmCaptureOptions) {
     this.#options = options;
@@ -100,16 +106,18 @@ export class PcmMicrophoneCapture {
         new RealtimeClientError("INVALID_STATE", "Microphone capture is already active"),
       );
     }
-    this.#starting = this.#start().finally(() => {
+    const generation = ++this.#generation;
+    this.#starting = this.#start(generation).finally(() => {
       this.#starting = undefined;
     });
     return this.#starting;
   }
 
-  async #start(): Promise<void> {
+  async #start(generation: number): Promise<void> {
     const mediaDevices = this.#options.mediaDevices ?? navigator.mediaDevices;
+    let stream: MediaStream;
     try {
-      this.#stream = await mediaDevices.getUserMedia({
+      stream = await mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
@@ -124,13 +132,31 @@ export class PcmMicrophoneCapture {
       });
     }
 
+    if (generation !== this.#generation) {
+      for (const track of stream.getTracks()) track.stop();
+      throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone startup was cancelled", {
+        recoverable: true,
+      });
+    }
+    this.#stream = stream;
+
     try {
       const context = (this.#context =
         this.#options.audioContextFactory?.() ?? new AudioContext({ latencyHint: "interactive" }));
       await context.audioWorklet.addModule(
         this.#options.workletUrl ?? new URL("./pcm-capture.worklet.js", import.meta.url),
       );
+      if (generation !== this.#generation) {
+        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone startup was cancelled", {
+          recoverable: true,
+        });
+      }
       await context.resume();
+      if (generation !== this.#generation) {
+        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone startup was cancelled", {
+          recoverable: true,
+        });
+      }
       this.#encoder = new StreamingPcm16Encoder(
         context.sampleRate,
         this.#options.format,
@@ -160,7 +186,8 @@ export class PcmMicrophoneCapture {
       this.#worklet.connect(this.#sink);
       this.#sink.connect(context.destination);
     } catch (cause) {
-      await this.stop();
+      await this.#cleanup();
+      if (cause instanceof RealtimeClientError) throw cause;
       throw new RealtimeClientError("CAPTURE_FAILED", "Could not start PCM audio capture", {
         recoverable: true,
         cause,
@@ -169,6 +196,11 @@ export class PcmMicrophoneCapture {
   }
 
   async stop(): Promise<PcmCaptureStats> {
+    ++this.#generation;
+    return this.#cleanup();
+  }
+
+  async #cleanup(): Promise<PcmCaptureStats> {
     const stats = this.#encoder?.finish() ?? {
       emittedFrames: 0,
       emittedBytes: 0,

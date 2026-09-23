@@ -1,6 +1,7 @@
 export type RealtimeClientErrorCode =
   | "CONNECT_TIMEOUT"
   | "HANDSHAKE_TIMEOUT"
+  | "RESPONSE_TIMEOUT"
   | "SOCKET_CLOSED"
   | "PROTOCOL_ERROR"
   | "INVALID_STATE"

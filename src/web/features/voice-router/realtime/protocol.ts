@@ -30,6 +30,86 @@ const envelopeFields = {
 const sessionFields = { sessionId: z.uuid() };
 const turnFields = { ...sessionFields, turnId: z.uuid() };
 
+const publicSttProviderStateSchema = z
+  .object({
+    status: z.enum(["pending", "final", "failed", "unavailable"]),
+    utteranceId: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+
+const publicSttOriginSchema = z
+  .object({
+    selectedProvider: z.enum(["openai", "yandex"]),
+    openai: publicSttProviderStateSchema,
+    yandex: publicSttProviderStateSchema,
+  })
+  .strict();
+
+const publicRouteScenarioSchema = z
+  .object({
+    scenario_id: z.string().min(1).max(200),
+    confidence: z.number().min(0).max(1),
+    reason: z.string().min(1).max(500),
+  })
+  .strict();
+
+const publicRouteAlternativeSchema = publicRouteScenarioSchema.omit({ reason: true });
+
+const publicRouteDecisionSchema = z
+  .object({
+    scenarios: z.array(publicRouteScenarioSchema).min(1).max(8),
+    alternatives: z.array(publicRouteAlternativeSchema).max(8),
+    language: z.enum(["ru", "kk", "mixed"]),
+    slots: z.record(z.string().min(1).max(100), z.unknown()),
+    is_continuation: z.boolean(),
+  })
+  .strict();
+
+const publicTurnPlanSchema = z
+  .object({
+    outcome: z.enum(["respond", "clarify", "handoff", "out_of_scope", "goodbye"]),
+    orderedScenarioIds: z.array(z.string().min(1).max(200)).min(1).max(8),
+    knowledgeRefs: z.array(z.string().min(1).max(200)).max(24),
+    missingSlots: z.array(z.string().min(1).max(200)).max(43),
+    nextQuestion: z.string().min(1).max(500).optional(),
+  })
+  .strict();
+
+const publicTraceEventSchema = z
+  .object({
+    stage: z.string().min(1).max(100),
+    status: z.enum(["started", "completed", "failed"]),
+    at: z.iso.datetime(),
+    durationMs: z.number().nonnegative().max(300_000).optional(),
+    detail: z.string().max(500).optional(),
+  })
+  .strict();
+
+/** Browser-safe result contract. Keep it local until the browser WS contract is shared. */
+export const publicTurnResultSchema = z
+  .object({
+    sessionId: z.uuid(),
+    turnId: z.uuid(),
+    selectedText: z.string().min(1).max(4000),
+    source: z.enum(["text", "stt"]),
+    stt: publicSttOriginSchema.optional(),
+    detectedLanguage: z.enum(["ru", "kk", "mixed"]).optional(),
+    responseLanguage: z.enum(["ru", "kk"]).optional(),
+    decision: publicRouteDecisionSchema.optional(),
+    plan: publicTurnPlanSchema.optional(),
+    answer: z.string().max(8000).optional(),
+    status: z.enum(["completed", "unavailable", "failed"]),
+    trace: z.array(publicTraceEventSchema).max(100),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.source === "stt") !== (value.stt !== undefined)) {
+      context.addIssue({ code: "custom", path: ["stt"], message: "STT origin must match source" });
+    }
+  });
+
+export type PublicTurnResult = z.infer<typeof publicTurnResultSchema>;
+
 export const serverMessageSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -79,7 +159,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
       ...envelopeFields,
       type: z.literal("turn.completed"),
       ...turnFields,
-      payload: z.object({ result: z.record(z.string(), z.unknown()) }).strict(),
+      payload: z
+        .object({
+          result: publicTurnResultSchema,
+          audioExpected: z.boolean(),
+        })
+        .strict(),
     })
     .strict(),
   z
