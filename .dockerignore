@@ -1,0 +1,10 @@
+node_modules
+.pnpm-store
+dist
+.git
+.env
+.env.*
+!.env.example
+.codex
+.codex-log
+*.zip
