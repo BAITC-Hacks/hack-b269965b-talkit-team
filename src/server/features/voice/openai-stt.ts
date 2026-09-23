@@ -69,8 +69,21 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
   const partials = new Map<string, string>();
 
   function fail(utteranceId?: string) {
-    if (closing) return;
+    if (closing || (!socket && !converter)) return;
     ready = false;
+    partials.clear();
+    oddPcmByte = undefined;
+    const failedConverter = converter;
+    const failedSocket = socket;
+    converter = undefined;
+    socket = undefined;
+    try {
+      failedConverter?.stdin.end();
+    } catch {
+      // The converter may already have closed its input after a process error.
+    }
+    failedConverter?.kill();
+    failedSocket?.terminate();
     config.onEvent({ type: "failed", ...(utteranceId ? { utteranceId } : {}), at: Date.now() });
   }
 
@@ -172,12 +185,20 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
       { windowsHide: true },
     );
     converter = process;
-    process.on("error", () => fail());
+    process.on("error", () => {
+      if (converter === process) fail();
+    });
     process.on("exit", () => {
-      if (!closing) fail();
+      if (converter === process) fail();
+    });
+    process.stdin.on("error", () => {
+      if (converter === process) fail();
+    });
+    process.stdout.on("error", () => {
+      if (converter === process) fail();
     });
     process.stdout.on("data", (value: Buffer) => {
-      if (!ready || value.length === 0) return;
+      if (converter !== process || !ready || value.length === 0) return;
       const joined = oddPcmByte ? Buffer.concat([oddPcmByte, value]) : value;
       const length = joined.length - (joined.length % 2);
       oddPcmByte = length < joined.length ? Buffer.from(joined.subarray(length)) : undefined;
@@ -212,6 +233,7 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
       };
       const rejectStartup = () => {
         cleanupStartup();
+        if (socket === ws) socket = undefined;
         ws.terminate();
         reject(new Error("OpenAI transcription session did not become ready"));
       };
@@ -248,9 +270,15 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
         }
         if (message.type === "session.updated" && configured) {
           cleanupStartup();
-          ws.on("message", onMessage);
-          ws.on("error", () => fail());
-          ws.on("close", () => fail());
+          ws.on("message", (raw: RawData) => {
+            if (socket === ws) onMessage(raw);
+          });
+          ws.on("error", () => {
+            if (socket === ws) fail();
+          });
+          ws.on("close", () => {
+            if (socket === ws) fail();
+          });
           ready = true;
           startConverter();
           resolve();
@@ -273,8 +301,13 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
     }
     // Node's false return value means the frame was accepted into its buffer.
     // The bounded writableLength check above is the actual overload guard.
-    converter.stdin.write(audio);
-    return true;
+    try {
+      converter.stdin.write(audio);
+      return true;
+    } catch {
+      fail();
+      return false;
+    }
   }
 
   function commit(): void {

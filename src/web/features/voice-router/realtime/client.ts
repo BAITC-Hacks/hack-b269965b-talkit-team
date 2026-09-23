@@ -129,9 +129,19 @@ function sameFormat(left: PcmAudioFormat, right: PcmAudioFormat): boolean {
 }
 
 function deepFreeze<T>(value: T): Readonly<T> {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
+  if (typeof value !== "object" || value === null) return value;
+  const pending: object[] = [value];
+  const seen = new WeakSet<object>();
+  while (pending.length > 0) {
+    const value = pending.pop()!;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    for (const nested of Object.values(value)) {
+      if (nested !== null && typeof nested === "object") pending.push(nested);
+    }
+    Object.freeze(value);
+  }
+  return value;
 }
 
 export class RealtimeVoiceClient {
@@ -186,9 +196,6 @@ export class RealtimeVoiceClient {
   getSnapshot(): Readonly<RealtimeVoiceSnapshot> {
     return Object.freeze({
       ...this.#snapshot,
-      lastError: this.#snapshot.lastError
-        ? Object.freeze({ ...this.#snapshot.lastError })
-        : undefined,
       sttHypotheses: Object.freeze([...this.#snapshot.sttHypotheses]),
       lastCompletedSttHypotheses: Object.freeze([...this.#snapshot.lastCompletedSttHypotheses]),
     });
@@ -324,9 +331,10 @@ export class RealtimeVoiceClient {
     }
   }
 
-  stopTurn(): Promise<void> {
-    if (this.#pendingStop && this.#pendingStop.turnId === this.#snapshot.activeTurnId) {
-      return this.#pendingStop.promise;
+  async stopTurn(): Promise<void> {
+    const pendingStop = this.#pendingStop;
+    if (pendingStop && pendingStop.turnId === this.#snapshot.activeTurnId) {
+      return pendingStop.promise;
     }
     this.#assertState("recording");
     const socket = this.#requireSocket();
@@ -351,6 +359,7 @@ export class RealtimeVoiceClient {
           }),
         );
       } catch (cause) {
+        if (this.#snapshot.activeTurnId !== turnId) return;
         await this.#fail(cause);
         throw safeRealtimeError(cause);
       }
@@ -498,6 +507,21 @@ export class RealtimeVoiceClient {
       this.#setSnapshot({ dsrResolution: message });
       return;
     }
+    if (message.type === "route.completed") {
+      if (
+        this.#turnCompleted ||
+        message.payload.result.sessionId !== message.sessionId ||
+        message.payload.result.turnId !== message.turnId
+      )
+        return;
+      this.#setSnapshot({
+        lastTurnResult: deepFreeze(
+          structuredClone({ ...message.payload.result, tts: { status: "pending" } }),
+        ),
+        lastResponseDelivery: { turnId: message.turnId, status: "pending" },
+      });
+      return;
+    }
     if (message.type === "audio.ready") {
       if (!sameFormat(message.payload.audioFormat, this.#audioFormat)) {
         this.#rejectAudioReady(
@@ -560,9 +584,6 @@ export class RealtimeVoiceClient {
           if (this.#playbackWindow !== playbackWindow) return;
           this.#setSnapshot({ queuedPlaybackSeconds: 0 });
           this.#maybeCompletePlayback(playbackWindow);
-        },
-        onError: (error) => {
-          if (this.#playbackWindow === playbackWindow) void this.#fail(error);
         },
       });
       return;

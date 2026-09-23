@@ -18,6 +18,10 @@ import {
   type RealtimeVoiceState,
 } from "../realtime/index.ts";
 
+const emit = defineEmits<{
+  resultUpdated: [result: Readonly<Record<string, unknown>>];
+}>();
+
 const audioLevel = ref(0);
 const client = new RealtimeVoiceClient({
   onAudioLevel: (level) => {
@@ -28,11 +32,16 @@ const snapshot = shallowRef<RealtimeVoiceSnapshot>(client.getSnapshot());
 const actionBusy = ref(false);
 const actionError = ref<string | null>(null);
 let unsubscribe: (() => void) | undefined;
+let lastEmittedResult: RealtimeVoiceSnapshot["lastTurnResult"];
 
 onMounted(() => {
   unsubscribe = client.subscribe((value) => {
     snapshot.value = value;
     if (value.state !== "recording") audioLevel.value = 0;
+    if (value.lastTurnResult && value.lastTurnResult !== lastEmittedResult) {
+      lastEmittedResult = value.lastTurnResult;
+      emit("resultUpdated", value.lastTurnResult);
+    }
   });
 });
 
@@ -65,6 +74,15 @@ const deliveryLabels: Record<
   incomplete: "ответ воспроизведён не полностью из-за ошибки TTS",
   interrupted: "воспроизведение прервано",
   not_played: "аудио не воспроизведено",
+};
+
+const ttsFailureLabels: Record<string, string> = {
+  provider: "сервис озвучки отклонил запрос",
+  transport: "ошибка соединения или аудиопотока",
+  protocol: "некорректный аудиопоток",
+  delivery: "не удалось передать аудио в браузер",
+  unavailable: "сервис озвучки не настроен",
+  unknown: "неизвестная ошибка озвучки",
 };
 
 const canConnect = computed(() => ["idle", "closed", "error"].includes(snapshot.value.state));
@@ -216,6 +234,11 @@ const lastResult = computed(() => {
     alternatives,
     measuredStages,
     ttsStatus: typeof tts?.status === "string" ? tts.status : undefined,
+    ttsFailureKind: typeof tts?.kind === "string" ? tts.kind : undefined,
+    ttsHttpStatus:
+      typeof tts?.httpStatus === "number" && Number.isInteger(tts.httpStatus)
+        ? tts.httpStatus
+        : undefined,
   };
 });
 </script>
@@ -386,6 +409,11 @@ const lastResult = computed(() => {
           · TTS:
           {{ lastResult.ttsStatus ?? "не запускался" }}
         </p>
+        <p v-if="lastResult.ttsStatus === 'failed'" class="text-xs text-destructive" role="alert">
+          Озвучка:
+          {{ ttsFailureLabels[lastResult.ttsFailureKind ?? "unknown"] ?? ttsFailureLabels.unknown
+          }}<span v-if="lastResult.ttsHttpStatus"> (HTTP {{ lastResult.ttsHttpStatus }})</span>.
+        </p>
         <p
           v-if="snapshot.lastResponseDelivery"
           class="text-xs"
@@ -397,7 +425,13 @@ const lastResult = computed(() => {
               : 'text-muted-foreground'
           "
         >
-          Воспроизведение: {{ deliveryLabels[snapshot.lastResponseDelivery.status] }}
+          Воспроизведение:
+          {{
+            lastResult.ttsStatus === "failed" &&
+            snapshot.lastResponseDelivery.status === "not_played"
+              ? "аудио не поступило в браузер"
+              : deliveryLabels[snapshot.lastResponseDelivery.status]
+          }}
         </p>
         <p v-if="snapshot.playbackStartedAt" class="text-xs text-muted-foreground">
           Воспроизведение началось: {{ new Date(snapshot.playbackStartedAt).toLocaleTimeString() }}
