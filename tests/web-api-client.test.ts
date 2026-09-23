@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { ApiError, echo, getHealth } from "../src/web/lib/api.ts";
+import { ApiError } from "../src/web/lib/http.ts";
+import { echo } from "../src/web/features/echo/api.ts";
+import { getHealth } from "../src/web/lib/health.ts";
 
 const originalFetch = globalThis.fetch;
 const requestId = "123e4567-e89b-42d3-a456-426614174000";
