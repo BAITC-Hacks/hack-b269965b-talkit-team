@@ -29,12 +29,12 @@ UI будет реализован отдельно и позже получен
 
 ## Текущая точка после pull и аудита P0
 
-- Проверенный `HEAD` — `7c433e1` (`init main audio protocols and sockets`); перед правкой TODO рабочее дерево было чистым.
+- Начальный проверенный `HEAD` был `7c433e1`; во время работы параллельный commit/pull перевёл ветку на `282b285` (`voice steck v2`) и включил промежуточную версию P0. Финальные проверки выполнены уже поверх `282b285`, оставшийся рабочий diff ограничен realtime feature и этим TODO.
 - В `src/web/features/voice-router/realtime/` появился независимый realtime-слой, но `App.vue`/`main.ts` его не импортируют. Поэтому обычный Vite build проверяет типы файлов через `vue-tsc`, но не доказывает, что realtime-код и AudioWorklet входят в фактический browser bundle.
 - Полученный backend реализует HTTP `POST /api/voice-router/turn` и собственное server-to-OpenAI Realtime соединение. Browser endpoint `/api/voice-router/ws`, обработчик HTTP upgrade, STT/DSR и TTS audio stream в текущем коде отсутствуют. Локальный `protocol.ts` всё ещё является предложением, а не согласованным контрактом.
 - Vite proxy для `/api` не содержит `ws: true`. Менять `vite.config.ts` в рамках этой frontend-задачи нельзя; требование передаётся владельцу root config.
 - Стратегия browser auth/origin, формат аудио backend → browser, порядок `turn.completed` относительно audio events и схема публичного результата не согласованы.
-- `pnpm.cmd install --frozen-lockfile` потребовался после pull, потому что локально отсутствовали новые `ws`/`@types/ws`. После синхронизации `pnpm.cmd run check` прошёл: typecheck и 36/36 тестов. Отдельные `build` и `smoke:built` также прошли. Realtime-specific тестов среди этих 36 нет.
+- `pnpm.cmd install --frozen-lockfile` потребовался после pull, потому что локально отсутствовали новые `ws`/`@types/ws`. После синхронизации финальный `pnpm.cmd run check` прошёл: typecheck и 36/36 основных тестов. Отдельные `build` и `smoke:built` также прошли. Дополнительно 14/14 realtime-specific тестов прошли прямым `node --test src/web/features/voice-router/realtime/realtime.test.mjs`.
 - Изолированная Vite library build public entry прошла без записи на диск и содержит protocol/controller и inline AudioWorklet marker. Обычная application build их не содержит, потому что приложение feature не импортирует.
 - В `docs/STATUS.md` в текущем `HEAD` закоммичены два неразрешённых conflict-блока (`<<<<<<< Updated upstream` / `>>>>>>> Stashed changes`). Это дефект полученных изменений вне разрешённой области `src/web`; в этой задаче файл не исправляется.
 
@@ -68,8 +68,8 @@ Server JSON:
 
 - `session.ready` — server `sessionId`, согласованный format и лимиты;
 - `audio.ready` — backend готов принимать binary frames текущего `turnId`;
-- `response.audio.start` / `response.audio.end` — границы входящего бинарного audio;
-- `turn.completed` — финальный публичный результат/trace для будущего UI;
+- `response.audio.start` / `response.audio.end` — границы входящего бинарного audio с обязательным `playbackId`;
+- `turn.completed` — валидированный публичный результат/trace и признак `audioExpected` для будущего UI;
 - `turn.interrupted` — подтверждение cancel;
 - `error` — безопасный code/message/recoverable;
 - `pong` — heartbeat response.
@@ -103,18 +103,18 @@ Binary frames:
 
 - [x] Создать `src/web/features/voice-router/realtime/protocol.ts` с `PROTOCOL_VERSION`, Zod schemas server events и builder-функциями client events.
 - [x] Envelope содержит `protocolVersion`, `type`, `eventId`, `sequence`, `occurredAt`, optional `sessionId`/`turnId` и строгий `payload`.
-- [ ] Довести применение handshake limits: формат и лимиты описаны, но client не проверяет, что backend выбрал предложенный формат, и не применяет согласованный `maxQueuedBytes` к transport.
+- [x] Проверить выбранный backend audio format и применить согласованные `maxFrameBytes`/`maxQueuedBytes` к исходящим и входящим binary frames.
 - [x] Не включать provider bodies, chain-of-thought, credentials, dataset или PII.
 - [x] Не принимать неизвестный `type`, лишние поля, неверный protocol version и небезопасные размеры/частоты.
 
 ## P0.2 — WebSocket lifecycle
 
 - [x] Создать transport с dependency-injected WebSocket factory и configurable URL; production default строится из текущего origin.
-- [ ] Реализовать и автоматическими тестами проверить допустимые переходы `idle | connecting | handshaking | ready | recording | waiting | playing | closing | closed | error`; состояния объявлены, но переходы тестами не покрыты.
+- [x] Реализовать и автоматическими тестами проверить допустимые переходы `idle | connecting | handshaking | ready | recording | waiting | playing | closing | closed | error`.
 - [x] `connect()` ждёт `session.ready` с timeout; повторный concurrent connect возвращает тот же promise или отклоняется предсказуемо.
 - [x] Настроить `binaryType = "arraybuffer"`; JSON и binary обрабатываются раздельно.
 - [x] Проверять монотонный server sequence, `sessionId`, `turnId` и generation token; stale events не меняют текущий state.
-- [ ] Завершить heartbeat: timeout и controlled close реализованы, но `pong.payload.pingEventId` не связывается с отправленным `ping`, отдельная проверка idle activity отсутствует.
+- [x] Связать `pong.payload.pingEventId` с единственным активным ping, проверять heartbeat timeout и отсутствие server activity, затем выполнять controlled close/cleanup.
 - [x] Добавить bounded binary outbox с проверкой `bufferedAmount`, лимитом queued bytes и последовательным drain.
 - [x] `destroy()` снимает listeners/timers, закрывает socket, capture и playback; повторный вызов безопасен.
 
@@ -124,29 +124,29 @@ Binary frames:
 - [x] `startCapture()` запрашивает `getUserMedia` только при явном вызове и не создаёт второй stream/node параллельно.
 - [x] Перевести Float32 input sample rate браузера в согласованный mono PCM16 sample rate с сохранением остатка между callbacks.
 - [x] Нарезать ровно по согласованному frame size; последний неполный frame либо корректно flush/pad по контракту, либо отбрасывается с явной метрикой.
-- [ ] Гарантировать PCM16 little-endian независимо от платформы и покрыть golden-byte тестом; сейчас используется native-endian `Int16Array`.
+- [x] Гарантировать PCM16 little-endian через `DataView`, покрыть golden-byte тестом и проверить непрерывность resampling между worklet chunks.
 - [x] `stopCapture()` отключает worklet/source, закрывает AudioContext и останавливает все MediaStream tracks.
-- [ ] Устранить гонку `start()` ↔ `stop()`/`interrupt()` во время `getUserMedia`: поздно выданный stream сейчас может продолжить запуск после cleanup и оставить микрофон/AudioContext активными.
+- [x] Устранить гонку `start()` ↔ `stop()`/`interrupt()` через generation token; поздно выданный stream останавливается до создания AudioContext.
 
 ## P0.4 — backend audio → playback
 
 - [x] Создать последовательную Web Audio playback queue для PCM16 frames с согласованным sample rate.
 - [x] Планировать chunks без overlap и больших gaps; учитывать currentTime и следующий scheduled time.
-- [ ] Привязать `playback.started` к подтверждённому движению `AudioContext`: сейчас это расчётный `setTimeout`, который может сработать при suspended context без слышимого звука.
+- [x] Привязать `playback.started` к `AudioContext.state === "running"` и достижению `currentTime >= startAt`; ожидание ограничено timeout и преобразуется в typed playback error.
 - [x] Ограничить queued audio duration; overflow — явная ошибка/cancel, не бесконечный рост памяти.
 - [x] `interrupt()`/`reset()` останавливает все sources, закрывает context и не проигрывает stale frames предыдущего turn.
-- [ ] Добавить явный playback unlock/prime из пользовательского жеста будущего UI, чтобы autoplay policy не оставляла context suspended после асинхронного ответа.
+- [x] Добавить публичный `preparePlayback()` и вызывать его из `startTurn()` до `audio.start`, чтобы будущий UI мог unlock/prime audio из пользовательского жеста.
 
 ## P0.5 — `RealtimeVoiceClient`
 
 - [x] Собрать transport, capture и playback в один controller без Vue/UI dependency.
-- [x] Публичный API: `connect`, `startTurn`, `stopTurn`, `interrupt`, `disconnect`, `destroy`, `subscribe`, `getSnapshot`.
+- [x] Публичный API: `connect`, `preparePlayback`, `startTurn`, `stopTurn`, `interrupt`, `disconnect`, `destroy`, `subscribe`, `getSnapshot`.
 - [x] `startTurn` выполняет `audio.start`, ждёт `audio.ready`, затем открывает отправку frames. До ack audio bytes не уходят в socket.
 - [x] `stopTurn` прекращает capture, дренирует уже принятые frames в пределах timeout и отправляет `audio.stop`.
 - [x] Входящий audio принимается только в ожидаемом response window и передаётся playback queue.
-- [ ] Зафиксировать и проверить порядок `turn.completed`, `response.audio.start` и `response.audio.end`: сейчас ранняя очистка `activeTurnId` может отбросить либо поздний result, либо поздно начавшийся audio stream.
-- [ ] Ошибки permission/socket/protocol/backpressure/playback преобразуются в безопасный typed client error, но полный cleanup не доказан до устранения гонки запуска capture и browser-теста.
-- [ ] Валидировать `turn.completed.payload.result` по согласованной публичной схеме; сейчас snapshot принимает произвольный `Record<string, unknown>`.
+- [x] Зафиксировать и проверить оба допустимых порядка result/audio: `turn.completed` до audio и после audio; завершать turn только после result и ожидаемого playback end/idle.
+- [x] Ошибки permission/socket/protocol/backpressure/playback/response-timeout преобразуются в безопасный typed client error и запускают полный cleanup; capture startup race покрыт fake-тестом.
+- [x] Валидировать `turn.completed.payload.result` локальной строгой browser-safe схемой; проверять совпадение result/session/turn и сохранять deep-frozen snapshot.
 - [x] Snapshot содержит UI-полезное состояние: connection/state, sessionId, activeTurnId, bytes sent/received, queue duration, last safe error и последний публичный turn result.
 
 ## P0.6 — проверка без backend и после pull
@@ -154,14 +154,15 @@ Binary frames:
 - [x] После pull синхронизировать зависимости и запустить текущий `pnpm.cmd run check`: typecheck и 36/36 существующих тестов прошли.
 - [x] Отдельно запустить `pnpm.cmd run build` и `pnpm.cmd run smoke:built`: production build и starter smoke прошли после остановки общего `verify`.
 - [x] Изолированно собрать public realtime entry через Vite с `write: false`: protocol/controller и AudioWorklet присутствуют в полученном chunk.
-- [ ] Добавить realtime-specific автоматические тесты с fake WebSocket/MediaDevices/AudioContext: handshake, invalid sequence/session/turn, backpressure, capture framing, event ordering, interrupt, permission race, disconnect/reconnect и cleanup.
-- [ ] Подключить public API хотя бы к отдельной browser entry/harness, чтобы Vite действительно собрал `client.ts` и `pcm-capture.worklet.js`; UI в эту задачу не входит.
+- [x] Добавить `realtime.test.mjs` рядом с feature: 14 fake-тестов покрывают schema/state, handshake limits, stale sequence/session/turn/socket, heartbeat, backpressure, PCM framing/resampling, event ordering, interrupt, permission race, response timeout, disconnect/reconnect и cleanup.
+- [x] Проверить public browser entry `src/web/features/voice-router/index.ts` отдельной Vite library build с `write: false`: chunk содержит controller, protocol, `playbackId`, response timeout и inline AudioWorklet. UI/application entry в эту задачу не входит.
 - [x] Финальный diff содержит изменения только в `src/web/**` и этом TODO.
 - [ ] Backend pull проверен: endpoint/events/audio format/auth для browser WebSocket в нём отсутствуют, поэтому согласовать и затем сверить `protocol.ts`; не сохранять несовместимость ради старого frontend-кода.
 - [ ] Если dev proxy должен поддерживать WebSocket, передать владельцу root config точное требование `ws: true`; самостоятельно `vite.config.ts` не менять.
 - [ ] Проверить реальный handshake, исходящие PCM frames, входящие audio frames, interrupt, backend error, disconnect и reconnect новой session.
 - [ ] Проверить microphone/playback в поддерживаемом browser через localhost/HTTPS; build сам по себе не доказывает media path.
 - [ ] После интеграции передать будущему UI только public controller API и snapshots; UI не должен обращаться к raw socket/audio nodes.
+- [ ] Общий `pnpm.cmd run verify` повторно остановился на `format:check` девяти файлов вне realtime-задачи (`docs/STATUS.md`, семь `src/server/features/voice-router/*.ts` и параллельно появившийся `src/web/components/ui/VoiceVisualizer.vue`); realtime-папка и этот TODO проходят отдельный Prettier check.
 
 ## P0.7 — обязательный backend/root contract для завершения P0
 
@@ -176,11 +177,11 @@ Binary frames:
 ## Definition of Done текущей frontend-задачи
 
 - [x] Вся реализация находится в `src/web/features/voice-router/realtime/`; server/shared/root/tests не изменены.
-- [ ] WebSocket lifecycle не допускает binary audio до ack и stale events после reconnect/destroy — реализовано статически, но не покрыто realtime-тестами и не проверено с backend.
-- [ ] Микрофон преобразуется в bounded PCM16 frames; входящие PCM16 frames последовательно воспроизводятся — реализация есть, browser/golden-byte проверок нет.
-- [ ] Interrupt и cleanup освобождают socket timers, AudioContext, nodes и MediaStream tracks — основной путь есть, но capture start/stop race остаётся.
+- [x] WebSocket lifecycle не допускает binary audio до ack и stale events после reconnect/destroy; это покрыто fake-тестами, live backend-проверка остаётся в P0.6.
+- [x] Микрофон преобразуется в bounded PCM16LE frames; входящие PCM16LE frames последовательно воспроизводятся; framing/resampling/playback покрыты unit-level fake-тестами.
+- [x] Interrupt и cleanup освобождают socket timers, AudioContext, nodes и MediaStream tracks; capture start/stop race и reconnect покрыты fake-тестами.
 - [x] Controller не зависит от Vue/UI и готов к подключению будущим экраном.
-- [ ] Offline `check`, отдельные build/smoke и isolated realtime build имеют фактически записанный результат; полный `verify`, включение realtime-кода в application bundle и live E2E должны быть подтверждены отдельно.
+- [ ] Offline realtime tests, `check`, build/smoke и isolated realtime build имеют фактически записанный результат; полный `verify`, включение realtime-кода в application bundle и live E2E должны быть подтверждены отдельно.
 
 ## Финальный отчёт агента
 
