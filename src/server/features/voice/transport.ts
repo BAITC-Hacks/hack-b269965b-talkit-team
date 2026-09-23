@@ -12,7 +12,7 @@ import {
 import type { VoiceRouterController } from "../voice-router/controller.ts";
 import { readVoiceProviderConfig } from "../voice-router/provider-config.ts";
 import { createDsrTurn, type DsrResult } from "./dsr.ts";
-import { createElevenLabsTts, ElevenLabsTtsError } from "./elevenlabs-tts.ts";
+import { createElevenLabsTts } from "./elevenlabs-tts.ts";
 import { createOpenAiStt, type OpenAiSttEvent } from "./openai-stt.ts";
 import { createYandexGrpcStreamFactory } from "./yandex-grpc.ts";
 import { createYandexStt, type YandexSttEvent } from "./yandex-stt.ts";
@@ -36,10 +36,10 @@ interface ActiveTurn {
   timeout: ReturnType<typeof setTimeout>;
   playbackId?: string;
   openaiItems: Map<string, { text: string; final: boolean }>;
-  openaiBoundaryItemId?: string;
-  openaiFinalized: boolean;
+  audioStoppedAt?: number;
+  openaiFinalTimer?: ReturnType<typeof setTimeout>;
+  openaiFinalizedText?: string;
   vadStopped: boolean;
-  yandexCommitted: boolean;
 }
 
 function sameFormat(value: typeof DEFAULT_AUDIO_FORMAT): boolean {
@@ -180,12 +180,8 @@ export function attachVoiceRouterSocket(
       turn.abort.abort(new Error("Turn ended"));
       turn.dsr.cancel();
       clearTimeout(turn.timeout);
+      if (turn.openaiFinalTimer) clearTimeout(turn.openaiFinalTimer);
       active = undefined;
-      const discardProviderBuffers = interrupted && turn.phase !== "starting";
-      if (discardProviderBuffers || (turn.openaiReady && !turn.openaiFinalized)) {
-        openai?.disconnect();
-      }
-      if (discardProviderBuffers) yandex?.disconnect();
       if (!interrupted) {
         recentTurns.set(turn.id, Date.now());
         while (recentTurns.size > 5) recentTurns.delete(recentTurns.keys().next().value as string);
@@ -216,11 +212,17 @@ export function attachVoiceRouterSocket(
             onEvent: (event) => onYandexEvent(event),
           })
         : undefined;
+    let warming: Promise<void> | undefined;
     function warmProviders(): Promise<void> {
-      return Promise.allSettled([
+      if (warming) return warming;
+      const pending = Promise.allSettled([
         ...(openai ? [openai.connect()] : []),
         ...(yandex ? [yandex.connect()] : []),
       ]).then(() => undefined);
+      warming = pending.finally(() => {
+        warming = undefined;
+      });
+      return warming;
     }
 
     function providerEvent(
@@ -263,27 +265,28 @@ export function attachVoiceRouterSocket(
       }
     }
 
-    function commitYandex(turn: ActiveTurn): void {
-      if (turn.yandexCommitted || !turn.yandexReady) return;
-      turn.yandexCommitted = true;
-      try {
-        yandex?.commit(turn.id);
-      } catch {
-        turn.dsr.record({ provider: "yandex", status: "failed" });
+    function finalizeOpenAiWindow(turn: ActiveTurn): void {
+      if (active !== turn || turn.audioStoppedAt === undefined) return;
+      if ([...turn.openaiItems.values()].some((item) => !item.final)) return;
+      const text = [...turn.openaiItems.values()]
+        .map((item) => item.text)
+        .filter(Boolean)
+        .join(" ");
+      if (!text || text === turn.openaiFinalizedText) return;
+      const remaining = turn.audioStoppedAt + 600 - Date.now();
+      if (remaining > 0) {
+        if (turn.openaiFinalTimer) clearTimeout(turn.openaiFinalTimer);
+        turn.openaiFinalTimer = setTimeout(() => finalizeOpenAiWindow(turn), remaining);
+        return;
       }
-    }
-
-    function finalizeOpenAiBoundary(turn: ActiveTurn): void {
-      if (active !== turn || turn.openaiFinalized || !turn.openaiBoundaryItemId) return;
-      const item = turn.openaiItems.get(turn.openaiBoundaryItemId);
-      if (!item?.final || !item.text) return;
-      turn.openaiFinalized = true;
+      turn.openaiFinalizedText = text;
+      const lastItemId = [...turn.openaiItems.keys()].at(-1);
       providerEvent(
         "openai",
         "final",
         turn.id,
-        item.text,
-        turn.openaiBoundaryItemId === "unidentified" ? undefined : turn.openaiBoundaryItemId,
+        text,
+        lastItemId === "unidentified" ? undefined : lastItemId,
         Date.now(),
       );
     }
@@ -292,34 +295,27 @@ export function attachVoiceRouterSocket(
       if (
         event.type === "speech_started" &&
         event.utteranceId &&
-        (active?.phase === "recording" || active?.phase === "recognizing")
+        (active?.phase === "recording" || active?.phase === "recognizing") &&
+        !active.vadStopped
       ) {
-        const knownTurn = itemTurns.get(event.utteranceId);
-        if (knownTurn && knownTurn !== active.id) return;
-        if (active.vadStopped && event.utteranceId !== active.openaiBoundaryItemId) return;
         itemTurns.set(event.utteranceId, active.id);
-        if (!active.openaiItems.has(event.utteranceId)) {
-          active.openaiItems.set(event.utteranceId, { text: "", final: false });
-        }
+        active.openaiItems.set(event.utteranceId, { text: "", final: false });
+        if (active.openaiFinalTimer) clearTimeout(active.openaiFinalTimer);
         if (itemTurns.size > 32) itemTurns.delete(itemTurns.keys().next().value as string);
       }
       if (event.type === "speech_stopped") {
         const turn = active;
-        if (
-          !turn ||
-          (turn.phase !== "recording" && turn.phase !== "recognizing") ||
-          turn.vadStopped
-        )
-          return;
-        const boundaryItemId =
-          event.utteranceId ??
-          (turn.openaiItems.size === 1 ? turn.openaiItems.keys().next().value : undefined);
-        if (!boundaryItemId || itemTurns.get(boundaryItemId) !== turn.id) return;
-        turn.openaiBoundaryItemId = boundaryItemId;
+        if (!turn || turn.phase !== "recording" || turn.vadStopped) return;
+        const knownTurn = event.utteranceId ? itemTurns.get(event.utteranceId) : undefined;
+        if (knownTurn && knownTurn !== turn.id) return;
+        if (event.utteranceId) {
+          itemTurns.set(event.utteranceId, turn.id);
+          if (!turn.openaiItems.has(event.utteranceId)) {
+            turn.openaiItems.set(event.utteranceId, { text: "", final: false });
+          }
+        }
         turn.vadStopped = true;
-        commitYandex(turn);
-        finalizeOpenAiBoundary(turn);
-        if (turn.phase === "recording" && sessionId) {
+        if (sessionId) {
           send("vad.speech_stopped", {
             sessionId,
             turnId: turn.id,
@@ -358,7 +354,7 @@ export function attachVoiceRouterSocket(
       }
       providerEvent("openai", status, turnId, text, event.utteranceId, event.at);
       if (current && current.id === turnId && event.type === "final") {
-        finalizeOpenAiBoundary(current);
+        finalizeOpenAiWindow(current);
       }
     }
 
@@ -396,10 +392,14 @@ export function attachVoiceRouterSocket(
         return;
       }
       const playbackId = randomUUID();
-      let audioStarted = false;
-      let audioBytesSent = 0;
-      let deliveryFailed = false;
-      let ttsResult: Record<string, unknown> = { status: "completed" };
+      turn.playbackId = playbackId;
+      lastPlayback = { id: playbackId, turnId: turn.id };
+      send("response.audio.start", {
+        sessionId,
+        turnId: turn.id,
+        payload: { audioFormat: DEFAULT_AUDIO_FORMAT, playbackId },
+      });
+      let ttsStatus: "completed" | "unavailable" | "failed" = "completed";
       try {
         await tts.stream({
           text: answer,
@@ -410,45 +410,20 @@ export function attachVoiceRouterSocket(
               await new Promise((resolve) => setTimeout(resolve, 10));
               turn.abort.signal.throwIfAborted();
             }
-            if (!audioStarted) {
-              turn.playbackId = playbackId;
-              lastPlayback = { id: playbackId, turnId: turn.id };
-              send("response.audio.start", {
-                sessionId,
-                turnId: turn.id,
-                payload: { audioFormat: DEFAULT_AUDIO_FORMAT, playbackId },
-              });
-              audioStarted = true;
-            }
             // Binary responses carry the playback ID so late chunks can be fenced.
-            try {
-              socket.send(Buffer.concat([Buffer.from(playbackId, "ascii"), audio]));
-              audioBytesSent += audio.length;
-            } catch {
-              deliveryFailed = true;
-              throw new Error("Voice audio delivery failed");
-            }
+            socket.send(Buffer.concat([Buffer.from(playbackId, "ascii"), audio]));
           },
         });
-        ttsResult = { status: "completed", audioBytesSent };
-      } catch (error) {
+      } catch {
         if (turn.abort.signal.aborted || active !== turn) return;
-        const providerError = error instanceof ElevenLabsTtsError ? error : undefined;
-        ttsResult = {
-          status: "failed",
-          kind: deliveryFailed ? "delivery" : (providerError?.kind ?? "unknown"),
-          ...(providerError?.status !== undefined ? { httpStatus: providerError.status } : {}),
-          audioBytesSent,
-        };
+        ttsStatus = "failed";
       }
       if (active !== turn || turn.abort.signal.aborted) return;
-      if (audioStarted) {
-        send("response.audio.end", { sessionId, turnId: turn.id, payload: { playbackId } });
-      }
+      send("response.audio.end", { sessionId, turnId: turn.id, payload: { playbackId } });
       send("turn.completed", {
         sessionId,
         turnId: turn.id,
-        payload: { result: { ...result, tts: ttsResult } },
+        payload: { result: { ...result, tts: { status: ttsStatus } } },
       });
       endTurn(turn, false);
     }
@@ -519,9 +494,7 @@ export function attachVoiceRouterSocket(
         openaiReady: false,
         yandexReady: false,
         openaiItems: new Map(),
-        openaiFinalized: false,
         vadStopped: false,
-        yandexCommitted: false,
         dsr: createDsrTurn({ openaiReady: false, yandexReady: false }),
         abort,
         frames: 0,
@@ -544,7 +517,7 @@ export function attachVoiceRouterSocket(
           return;
         }
         turn.openaiReady = Boolean(openai?.ready);
-        turn.yandexReady = Boolean(yandex?.canStartUtterance);
+        turn.yandexReady = Boolean(yandex?.ready);
         turn.dsr = createDsrTurn({ openaiReady: turn.openaiReady, yandexReady: turn.yandexReady });
         turn.phase = "recording";
         send("audio.ready", {
@@ -574,9 +547,6 @@ export function attachVoiceRouterSocket(
         endTurn(turn, true);
         return;
       }
-      // The authoritative VAD boundary has closed this utterance. Count frames
-      // already in flight for audio.stop, but do not feed them into the next one.
-      if (turn.vadStopped) return;
       if (turn.openaiReady && !openai?.sendAudioChunk(audio)) {
         turn.dsr.record({ provider: "openai", status: "failed" });
       }
@@ -636,9 +606,16 @@ export function attachVoiceRouterSocket(
           return;
         }
         turn.phase = "recognizing";
+        turn.audioStoppedAt = Date.now();
         if (turn.openaiReady && !turn.vadStopped) openai?.commit();
-        commitYandex(turn);
-        if (turn.openaiReady) finalizeOpenAiBoundary(turn);
+        if (turn.yandexReady && yandex?.ready) {
+          try {
+            yandex.commit(turn.id);
+          } catch {
+            turn.dsr.record({ provider: "yandex", status: "failed" });
+          }
+        }
+        if (turn.openaiReady) finalizeOpenAiWindow(turn);
         void resolveTurn(turn).catch(() => {
           if (active !== turn) return;
           sendError("TURN_FAILED", "Voice turn failed", true, turn.id);

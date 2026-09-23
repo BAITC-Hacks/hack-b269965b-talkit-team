@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from "vue";
-import { turnResultSchema } from "../../shared/voice-router.ts";
+import { computed } from "vue";
 import AppHeader from "../components/layout/AppHeader.vue";
 import { Badge } from "../components/ui/badge/index.ts";
 import {
@@ -17,34 +16,10 @@ import { useVoiceRouter } from "../features/voice-router/useVoiceRouter.ts";
 
 const controller = useVoiceRouter();
 const { status, healthy, result } = controller;
-const latestChannel = ref<"text" | "voice">("text");
-const voiceResult = shallowRef<Readonly<Record<string, unknown>> | null>(null);
-
-watch(result, () => {
-  latestChannel.value = "text";
-});
-
-function onVoiceTurnCompleted(value: Readonly<Record<string, unknown>>): void {
-  voiceResult.value = value;
-  latestChannel.value = "voice";
-}
-
-const traceResult = computed(() => {
-  if (latestChannel.value === "text") return result.value;
-  if (!voiceResult.value) return null;
-  const { dsr: _dsr, tts: _tts, ...routerResult } = voiceResult.value;
-  const parsed = turnResultSchema.safeParse(routerResult);
-  return parsed.success ? parsed.data : null;
-});
-const traceStatus = computed(() => {
-  if (latestChannel.value === "text") return result.value?.status;
-  const value = voiceResult.value?.status;
-  return typeof value === "string" ? value : undefined;
-});
 
 function durationForStages(stages: readonly string[]): number | null {
   const events =
-    traceResult.value?.trace.filter(
+    result.value?.trace.filter(
       (event) =>
         stages.includes(event.stage) &&
         event.durationMs !== undefined &&
@@ -54,10 +29,10 @@ function durationForStages(stages: readonly string[]): number | null {
   return events.reduce((total, event) => total + (event.durationMs ?? 0), 0);
 }
 
-const selected = computed(() => traceResult.value?.decision?.scenarios[0] ?? null);
-const alternative = computed(() => traceResult.value?.decision?.alternatives[0] ?? null);
+const selected = computed(() => result.value?.decision?.scenarios[0] ?? null);
+const alternative = computed(() => result.value?.decision?.alternatives[0] ?? null);
 const language = computed(() => {
-  const detected = traceResult.value?.decision?.language ?? traceResult.value?.detectedLanguage;
+  const detected = result.value?.decision?.language ?? result.value?.detectedLanguage;
   if (detected === "ru") return "RU";
   if (detected === "kk") return "KK";
   if (detected === "mixed") return "RU + KK";
@@ -66,7 +41,7 @@ const language = computed(() => {
 
 const totalDuration = computed(() => {
   const events =
-    traceResult.value?.trace.filter(
+    result.value?.trace.filter(
       (event) => event.durationMs !== undefined && event.status !== "started",
     ) ?? [];
   if (events.length === 0) return null;
@@ -76,9 +51,8 @@ const totalDuration = computed(() => {
 const traceMetrics = computed(() => [
   {
     label: "STT",
-    value:
-      traceResult.value?.source === "text" ? null : durationForStages(["stt", "transcription"]),
-    detail: traceResult.value?.source === "text" ? "текстовый ввод" : undefined,
+    value: result.value?.source === "text" ? null : durationForStages(["stt", "transcription"]),
+    detail: result.value?.source === "text" ? "текстовый ввод" : undefined,
   },
   { label: "Router", value: durationForStages(["routing"]) },
   { label: "Response", value: durationForStages(["answer"]) },
@@ -115,7 +89,7 @@ function formatConfidence(value: number): string {
 
       <div class="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div class="flex min-w-0 flex-col gap-5">
-          <VoiceCallPanel @turn-completed="onVoiceTurnCompleted" />
+          <VoiceCallPanel />
           <VoiceChatPanel :controller="controller" />
         </div>
 
@@ -125,17 +99,14 @@ function formatConfidence(value: number): string {
           >
             <div class="flex flex-col gap-1.5">
               <CardTitle id="trace-title" class="text-base">Router trace</CardTitle>
-              <CardDescription>
-                {{ latestChannel === "voice" ? "Голосовой канал" : "Текстовый канал" }}: решение и
-                измеренные этапы
-              </CardDescription>
+              <CardDescription>Текстовый канал: решение и измеренные этапы</CardDescription>
             </div>
             <Badge
               :variant="
-                !traceStatus ? 'outline' : traceStatus === 'completed' ? 'secondary' : 'destructive'
+                !result ? 'outline' : result.status === 'completed' ? 'secondary' : 'destructive'
               "
             >
-              {{ traceStatus ?? "ожидание" }}
+              {{ result?.status ?? "ожидание" }}
             </Badge>
           </CardHeader>
 
@@ -154,8 +125,7 @@ function formatConfidence(value: number): string {
               <div class="flex items-center justify-between gap-3">
                 <span class="min-w-0 truncate font-mono text-sm font-semibold">
                   {{
-                    selected?.scenario_id ??
-                    (traceStatus ? "Решение не получено" : "Ожидает реплику")
+                    selected?.scenario_id ?? (result ? "Решение не получено" : "Ожидает реплику")
                   }}
                 </span>
                 <Badge v-if="selected" variant="secondary">{{
@@ -217,13 +187,6 @@ function formatConfidence(value: number): string {
 
             <p class="text-xs leading-relaxed text-muted-foreground">
               Total — сумма измеренных серверных этапов, не сквозная задержка до воспроизведения.
-            </p>
-            <p
-              v-if="latestChannel === 'voice'"
-              class="text-xs leading-relaxed text-muted-foreground"
-            >
-              STT и TTS first пока не измеряются в серверной трассе; «—» означает отсутствие замера,
-              а не нулевую задержку.
             </p>
           </CardContent>
         </Card>

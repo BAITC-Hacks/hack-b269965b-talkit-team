@@ -93,14 +93,7 @@ export function createElevenLabsTts(config: ElevenLabsTtsConfig) {
       try {
         while (true) {
           input.signal?.throwIfAborted();
-          let read: Awaited<ReturnType<typeof reader.read>>;
-          try {
-            read = await reader.read();
-          } catch {
-            input.signal?.throwIfAborted();
-            throw new ElevenLabsTtsError("transport", "ElevenLabs audio stream failed");
-          }
-          const { done, value } = read;
+          const { done, value } = await reader.read();
           if (done) break;
           if (!(value instanceof Uint8Array)) {
             throw new ElevenLabsTtsError("protocol", "ElevenLabs TTS returned invalid audio data");

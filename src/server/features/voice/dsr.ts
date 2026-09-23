@@ -104,25 +104,21 @@ export function createDsrTurn(config: DsrTurnConfig) {
       return;
     }
 
+    const secondProviderDeadline =
+      firstFinalAt === undefined
+        ? deadline
+        : Math.min(deadline, Math.max(finishAt, firstFinalAt) + secondProviderWaitMs);
+
     if (openai.status === "final") {
-      const secondProviderDeadline =
-        firstFinalAt === undefined
-          ? deadline
-          : Math.min(deadline, Math.max(finishAt, firstFinalAt) + secondProviderWaitMs);
       if (yandex.status !== "pending" || now >= secondProviderDeadline) {
         settle("accepted", `openai_authoritative_yandex_${yandex.status}`, [], "openai");
         return;
       }
-      timer = setTimeout(decide, Math.max(1, Math.ceil(secondProviderDeadline - now)));
-      return;
     } else if (yandex.status === "final") {
-      // A supportive final cannot shorten the authoritative provider's deadline.
-      if (openai.status !== "pending" || now >= deadline) {
+      if (openai.status !== "pending" || now >= secondProviderDeadline) {
         settle("accepted", `yandex_fallback_openai_${openai.status}`, [], "yandex");
         return;
       }
-      timer = setTimeout(decide, Math.max(1, Math.ceil(deadline - now)));
-      return;
     } else if (openai.status !== "pending" && yandex.status !== "pending") {
       settle("unavailable", "no_final_transcript");
       return;
@@ -132,7 +128,8 @@ export function createDsrTurn(config: DsrTurnConfig) {
       settle("unavailable", "final_transcript_timeout");
       return;
     }
-    timer = setTimeout(decide, Math.max(1, Math.ceil(deadline - now)));
+    const nextDeadline = firstFinalAt === undefined ? deadline : secondProviderDeadline;
+    timer = setTimeout(decide, Math.max(1, Math.ceil(nextDeadline - now)));
   }
 
   return {
