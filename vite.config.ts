@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { readConfig } from "./src/server/env.ts";
+import tailwindcss from "@tailwindcss/vite";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 export default defineConfig(({ mode }) => {
@@ -10,7 +11,8 @@ export default defineConfig(({ mode }) => {
   return {
     root: fileURLToPath(new URL("./src/web", import.meta.url)),
     envDir: root,
-    plugins: [vue()],
+    plugins: [vue(), tailwindcss()],
+    resolve: { alias: { "@": fileURLToPath(new URL("./src/web", import.meta.url)) } },
     server: {
       host: "127.0.0.1",
       port: config.webPort,

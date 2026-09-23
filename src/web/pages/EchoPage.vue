@@ -47,6 +47,7 @@ main {
 }
 h1 {
   font-size: clamp(30px, 4.5vw, 48px);
+  font-weight: 700;
   line-height: 1.18;
   letter-spacing: -1.4px;
   margin: 22px 0 18px;

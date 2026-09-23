@@ -20,3 +20,31 @@
   `pnpm run smoke:built` passed health, echo, API 404, built SPA, and asset checks.
 - Interactive browser behavior and visual layout were not manually checked.
 - `docs/BRIEF.md` and `docs/PREEXISTING.md` were absent from this checkout.
+
+## 2026-09-23 — shadcn-vue essentials
+
+- Configured Tailwind CSS 4, the Vite plugin, the CLI registry, and the web alias.
+- Installed only the Button and Textarea primitives used by the existing echo form.
+  Adapted generated imports to the repository's relative `.ts` import convention
+  and fixed generated Textarea typing under strict TypeScript settings.
+- Reused the existing demo's busy behavior through `BaseButton` and mapped shadcn
+  colors to the current palette. Removed the icon dependency added by the CLI,
+  since these primitives do not use it.
+- `pnpm run check` passed: type checks and all 32 tests.
+- `pnpm run verify` passed: diagnostics, formatting, types, tests, build, and
+  smoke checks. Formatted only table spacing in the root `README.md` to satisfy
+  the existing repository-wide formatting gate.
+- Browser layout was not manually inspected.
+
+## 2026-09-23 — shadcn-vue regression audit
+
+- Reviewed dependency and component changes and confirmed the generated Button
+  forwards submit and busy attributes in rendered HTML.
+- Found that the generated Textarea's content sizing conflicts with the existing
+  five-row field. Restored fixed field sizing for the echo form and added render
+  assertions for Textarea and Button attributes.
+- Tailwind's preflight removed the page headings' implicit bold weight; restored
+  explicit heading weights. Restored the enabled Button's pointer cursor.
+- `pnpm run verify` passed after these repairs: diagnostics, formatting, types,
+  all 32 tests, build, and built API/SPA smoke checks. Browser inspection was
+  unavailable because no browser surface was exposed in this session.

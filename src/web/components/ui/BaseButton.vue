@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { Button } from "./button/index.ts";
+
 withDefaults(
   defineProps<{ busy?: boolean; variant?: "primary" | "secondary"; type?: "button" | "submit" }>(),
   {
@@ -9,36 +11,18 @@ withDefaults(
 );
 </script>
 <template>
-  <button :type="type" class="button" :class="variant" :disabled="busy" :aria-busy="busy">
+  <Button
+    :type="type"
+    :variant="variant === 'primary' ? 'default' : 'secondary'"
+    :disabled="busy"
+    :aria-busy="busy"
+  >
     <span v-if="busy" class="spinner" aria-hidden="true"></span>
     <slot />
-  </button>
+  </Button>
 </template>
 
 <style scoped>
-.button {
-  border: 0;
-  border-radius: 9px;
-  padding: 12px 16px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  font-size: 13px;
-}
-.button.primary {
-  background: var(--brand);
-  color: white;
-}
-.button.secondary {
-  background: #eef0f5;
-  color: #171717;
-}
-.button:disabled {
-  opacity: 0.65;
-  cursor: wait;
-}
 .spinner {
   width: 13px;
   height: 13px;

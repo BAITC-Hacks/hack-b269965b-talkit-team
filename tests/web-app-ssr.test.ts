@@ -23,6 +23,8 @@ test("App.vue compiles and renders its initial state", async () => {
     assert.match(html, /Проверяем API/);
     assert.match(html, /Сәлем, HackAlem!/);
     assert.match(html, /Тестовое сообщение/);
+    assert.match(html, /<textarea\b[^>]*\brows="5"[^>]*\baria-describedby="message-help"/);
+    assert.match(html, /<button\b[^>]*\btype="submit"[^>]*\baria-busy="false"/);
     assert.match(html, /Здесь появится настоящий ответ API/);
   } finally {
     await server.close();

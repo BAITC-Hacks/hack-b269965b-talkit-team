@@ -1,2 +1,18 @@
+@import "tailwindcss";
 @import "./tokens.css";
 @import "./base.css";
+
+@theme inline {
+  --color-background: #f7f8fc;
+  --color-primary: var(--brand);
+  --color-primary-foreground: #fff;
+  --color-secondary: #eef0f5;
+  --color-secondary-foreground: #171717;
+  --color-destructive: var(--error);
+  --color-input: #ccd1dd;
+  --color-border: var(--line);
+  --color-ring: var(--focus);
+  --color-accent: #eef0f5;
+  --color-accent-foreground: #171717;
+  --color-muted-foreground: var(--muted);
+}

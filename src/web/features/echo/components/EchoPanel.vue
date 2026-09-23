@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import BaseButton from "../../../components/ui/BaseButton.vue";
+import { Textarea } from "../../../components/ui/textarea/index.ts";
 import type { useEcho } from "../useEcho.ts";
 const props = defineProps<{ controller: ReturnType<typeof useEcho> }>();
 const { text, busy, result, error, inputInvalid, clearInputError, submit } = props.controller;
@@ -13,7 +14,7 @@ const { text, busy, result, error, inputInvalid, clearInputError, submit } = pro
       </div>
       <form novalidate @submit.prevent="submit">
         <label for="message">Тестовое сообщение</label>
-        <textarea
+        <Textarea
           id="message"
           v-model="text"
           rows="5"
@@ -81,6 +82,7 @@ const { text, busy, result, error, inputInvalid, clearInputError, submit } = pro
 }
 h2 {
   font-size: 17px;
+  font-weight: 700;
   margin: 0;
 }
 label {
@@ -92,6 +94,7 @@ label {
 textarea {
   width: 100%;
   resize: vertical;
+  field-sizing: fixed;
   border-radius: 10px;
   border: 1px solid #ccd1dd;
   padding: 14px;
