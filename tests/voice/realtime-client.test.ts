@@ -477,6 +477,73 @@ test("TTS failure before audio keeps safe diagnostics and never reports playback
   }
 });
 
+test("route result is visible before TTS completes without ending the voice turn", async () => {
+  const socket = new FakeSocket();
+  const client = new RealtimeVoiceClient({
+    url: "ws://localhost/api/voice-router/ws",
+    socketFactory: () => {
+      socket.open();
+      return socket as unknown as WebSocket;
+    },
+    captureFactory: () => ({
+      async start() {},
+      async pause() {
+        return { emittedFrames: 0, emittedBytes: 0, droppedSamples: 0 };
+      },
+      async stop() {
+        return { emittedFrames: 0, emittedBytes: 0, droppedSamples: 0 };
+      },
+    }),
+  });
+
+  try {
+    await client.connect();
+    const turnId = await client.startTurn();
+    await client.stopTurn();
+    const routeResult = {
+      sessionId,
+      turnId,
+      selectedText: "Нужна помощь",
+      source: "stt",
+      status: "completed",
+      decision: {
+        scenarios: [{ scenario_id: "SYS_UNCLEAR", confidence: 0.8, reason: "Нужна детализация" }],
+        alternatives: [],
+        language: "ru",
+        slots: {},
+        is_continuation: false,
+      },
+      answer: "Уточните, пожалуйста, вопрос.",
+      trace: [
+        { stage: "routing", status: "completed", at: new Date().toISOString(), durationMs: 38 },
+      ],
+    };
+
+    socket.emit("route.completed", { sessionId, turnId, payload: { result: routeResult } });
+    assert.equal(client.getSnapshot().state, "waiting");
+    assert.equal(client.getSnapshot().lastTurnResult?.answer, routeResult.answer);
+    assert.deepEqual(client.getSnapshot().lastTurnResult?.decision, routeResult.decision);
+    assert.deepEqual(client.getSnapshot().lastTurnResult?.tts, { status: "pending" });
+    assert.ok(Object.isFrozen(client.getSnapshot().lastTurnResult?.decision));
+    assert.ok(Object.isFrozen(client.getSnapshot().lastTurnResult?.tts));
+    assert.equal(client.getSnapshot().lastResponseDelivery?.status, "pending");
+
+    socket.emit("turn.completed", {
+      sessionId,
+      turnId,
+      payload: { result: { ...routeResult, tts: { status: "failed", kind: "provider" } } },
+    });
+    assert.equal(client.getSnapshot().state, "ready");
+    assert.deepEqual(client.getSnapshot().lastTurnResult?.tts, {
+      status: "failed",
+      kind: "provider",
+    });
+    assert.equal(client.getSnapshot().lastResponseDelivery?.status, "not_played");
+  } finally {
+    await client.destroy();
+  }
+});
+
 test("VAD speech stop ends only the matching recording turn once", async () => {
   const socket = new FakeSocket();
   let pauseCount = 0;
