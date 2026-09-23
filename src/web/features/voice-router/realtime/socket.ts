@@ -20,8 +20,10 @@ export interface RealtimeSocketOptions {
   socketFactory?: SocketFactory;
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
+  maxFrameBytes?: number;
   maxBufferedAmount?: number;
   maxQueuedBytes?: number;
+  maxJsonMessageBytes?: number;
   drainIntervalMs?: number;
 }
 
@@ -37,6 +39,8 @@ export class RealtimeSocket {
   #serverSequence = -1;
   #queue: ArrayBuffer[] = [];
   #queuedBytes = 0;
+  #maxFrameBytes: number;
+  #maxQueuedBytes: number;
   #drainTimer: number | undefined;
   #handshakeReject: ((reason?: unknown) => void) | undefined;
   #listenerController: AbortController | undefined;
@@ -47,10 +51,14 @@ export class RealtimeSocket {
       socketFactory: options.socketFactory ?? ((url) => new WebSocket(url)),
       connectTimeoutMs: options.connectTimeoutMs ?? 8000,
       handshakeTimeoutMs: options.handshakeTimeoutMs ?? 8000,
+      maxFrameBytes: options.maxFrameBytes ?? 65_536,
       maxBufferedAmount: options.maxBufferedAmount ?? 256 * 1024,
       maxQueuedBytes: options.maxQueuedBytes ?? 2 * 1024 * 1024,
+      maxJsonMessageBytes: options.maxJsonMessageBytes ?? 256 * 1024,
       drainIntervalMs: options.drainIntervalMs ?? 10,
     };
+    this.#maxFrameBytes = this.#options.maxFrameBytes;
+    this.#maxQueuedBytes = this.#options.maxQueuedBytes;
   }
 
   subscribe(listener: (event: RealtimeSocketEvent) => void): () => void {
@@ -164,11 +172,34 @@ export class RealtimeSocket {
     socket.send(JSON.stringify(message));
   }
 
+  applyNegotiatedLimits(limits: { maxFrameBytes: number; maxQueuedBytes: number }): void {
+    if (this.#queue.length || this.#queuedBytes) {
+      throw new RealtimeClientError(
+        "INVALID_STATE",
+        "Cannot change realtime limits while audio is queued",
+      );
+    }
+    if (!Number.isSafeInteger(limits.maxFrameBytes) || limits.maxFrameBytes <= 0) {
+      throw new RealtimeClientError("PROTOCOL_ERROR", "Backend sent an invalid frame limit");
+    }
+    if (!Number.isSafeInteger(limits.maxQueuedBytes) || limits.maxQueuedBytes <= 0) {
+      throw new RealtimeClientError("PROTOCOL_ERROR", "Backend sent an invalid queue limit");
+    }
+    this.#maxFrameBytes = Math.min(this.#options.maxFrameBytes, limits.maxFrameBytes);
+    this.#maxQueuedBytes = Math.min(this.#options.maxQueuedBytes, limits.maxQueuedBytes);
+    if (this.#maxQueuedBytes < this.#maxFrameBytes) {
+      this.#maxFrameBytes = this.#maxQueuedBytes;
+    }
+  }
+
   sendBinary(frame: ArrayBuffer): void {
     if (frame.byteLength === 0 || frame.byteLength % 2 !== 0) {
       throw new RealtimeClientError("PROTOCOL_ERROR", "PCM16 frame has an invalid byte length");
     }
-    if (this.#queuedBytes + frame.byteLength > this.#options.maxQueuedBytes) {
+    if (frame.byteLength > this.#maxFrameBytes) {
+      throw new RealtimeClientError("PROTOCOL_ERROR", "PCM16 frame exceeds the negotiated limit");
+    }
+    if (this.#queuedBytes + frame.byteLength > this.#maxQueuedBytes) {
       throw new RealtimeClientError("BACKPRESSURE", "Outgoing audio queue is full", {
         recoverable: true,
       });
@@ -245,6 +276,10 @@ export class RealtimeSocket {
         return;
       }
       if (generation === this.#generation) this.#emit({ type: "binary", data });
+      return;
+    }
+    if (new TextEncoder().encode(event.data).byteLength > this.#options.maxJsonMessageBytes) {
+      this.#protocolFailure("Backend JSON event exceeds the client limit");
       return;
     }
     let value: unknown;

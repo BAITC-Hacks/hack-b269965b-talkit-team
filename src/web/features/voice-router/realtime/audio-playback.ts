@@ -18,6 +18,8 @@ export class PcmPlaybackQueue {
   #sources = new Set<AudioBufferSourceNode>();
   #startTimers = new Set<number>();
   #started = false;
+  #startConfirmationPending = false;
+  #generation = 0;
 
   constructor(options: PcmPlaybackOptions) {
     this.#options = {
@@ -37,6 +39,13 @@ export class PcmPlaybackQueue {
   async prime(): Promise<void> {
     const context = this.#context ?? (this.#context = this.#options.audioContextFactory());
     if (context.state === "suspended") await context.resume();
+    if (context.state !== "running") {
+      throw new RealtimeClientError(
+        "PLAYBACK_FAILED",
+        "Browser did not unlock audio playback; call preparePlayback from a user gesture",
+        { recoverable: true },
+      );
+    }
   }
 
   async enqueue(data: ArrayBuffer): Promise<void> {
@@ -46,17 +55,18 @@ export class PcmPlaybackQueue {
     await this.prime();
     const context = this.#context;
     if (!context) throw new RealtimeClientError("PLAYBACK_FAILED", "Audio context is unavailable");
-    const samples = new Int16Array(data);
-    const duration = samples.length / this.#options.format.sampleRate;
+    const sampleCount = data.byteLength / 2;
+    const duration = sampleCount / this.#options.format.sampleRate;
     if (this.queuedSeconds + duration > this.#options.maxQueuedSeconds) {
       throw new RealtimeClientError("BACKPRESSURE", "Incoming audio queue is full", {
         recoverable: true,
       });
     }
-    const buffer = context.createBuffer(1, samples.length, this.#options.format.sampleRate);
+    const buffer = context.createBuffer(1, sampleCount, this.#options.format.sampleRate);
     const channel = buffer.getChannelData(0);
-    for (let index = 0; index < samples.length; index += 1) {
-      const sample = samples[index]!;
+    const view = new DataView(data);
+    for (let index = 0; index < sampleCount; index += 1) {
+      const sample = view.getInt16(index * 2, true);
       channel[index] = sample < 0 ? sample / 0x8000 : sample / 0x7fff;
     }
     const source = context.createBufferSource();
@@ -71,22 +81,21 @@ export class PcmPlaybackQueue {
       if (!this.#sources.size) {
         this.#nextStartAt = 0;
         this.#started = false;
+        this.#startConfirmationPending = false;
+        for (const timer of this.#startTimers) window.clearTimeout(timer);
+        this.#startTimers.clear();
         this.#options.onIdle();
       }
     };
-    if (!this.#started) {
-      this.#started = true;
-      const delayMs = Math.max(0, (startAt - context.currentTime) * 1000);
-      const timer = window.setTimeout(() => {
-        this.#startTimers.delete(timer);
-        if (this.#sources.has(source)) this.#options.onStarted();
-      }, delayMs);
-      this.#startTimers.add(timer);
-    }
     source.start(startAt);
+    if (!this.#started && !this.#startConfirmationPending) {
+      this.#startConfirmationPending = true;
+      this.#confirmStarted(context, startAt, this.#generation);
+    }
   }
 
   async cancel(): Promise<void> {
+    ++this.#generation;
     for (const timer of this.#startTimers) window.clearTimeout(timer);
     this.#startTimers.clear();
     for (const source of this.#sources) {
@@ -101,8 +110,24 @@ export class PcmPlaybackQueue {
     this.#sources.clear();
     this.#nextStartAt = 0;
     this.#started = false;
+    this.#startConfirmationPending = false;
     const context = this.#context;
     this.#context = undefined;
     if (context && context.state !== "closed") await context.close();
+  }
+
+  #confirmStarted(context: AudioContext, startAt: number, generation: number): void {
+    if (generation !== this.#generation || !this.#startConfirmationPending) return;
+    if (context.state === "running" && context.currentTime >= startAt) {
+      this.#startConfirmationPending = false;
+      this.#started = true;
+      this.#options.onStarted();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      this.#startTimers.delete(timer);
+      this.#confirmStarted(context, startAt, generation);
+    }, 10);
+    this.#startTimers.add(timer);
   }
 }

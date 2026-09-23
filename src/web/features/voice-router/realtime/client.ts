@@ -11,6 +11,7 @@ import {
   defaultRealtimeWebSocketUrl,
   type ClientMessage,
   type PcmAudioFormat,
+  type PublicTurnResult,
   type ServerMessage,
 } from "./protocol.ts";
 import {
@@ -40,7 +41,7 @@ export interface RealtimeVoiceSnapshot {
   bytesReceived: number;
   queuedPlaybackSeconds: number;
   lastError: { code: string; message: string; recoverable: boolean } | undefined;
-  lastTurnResult: Readonly<Record<string, unknown>> | undefined;
+  lastTurnResult: Readonly<PublicTurnResult> | undefined;
 }
 
 interface CaptureLike {
@@ -64,6 +65,7 @@ export interface RealtimeVoiceClientOptions {
   playbackFactory?: (options: PcmPlaybackOptions) => PlaybackLike;
   audioReadyTimeoutMs?: number;
   flushTimeoutMs?: number;
+  responseTimeoutMs?: number;
 }
 
 function sameFormat(left: PcmAudioFormat, right: PcmAudioFormat): boolean {
@@ -73,6 +75,28 @@ function sameFormat(left: PcmAudioFormat, right: PcmAudioFormat): boolean {
     left.channels === right.channels &&
     left.frameSamples === right.frameSamples
   );
+}
+
+const ALLOWED_STATE_TRANSITIONS: Readonly<
+  Record<RealtimeVoiceState, ReadonlySet<RealtimeVoiceState>>
+> = {
+  idle: new Set(["connecting"]),
+  connecting: new Set(["handshaking", "closing", "error"]),
+  handshaking: new Set(["ready", "closing", "error"]),
+  ready: new Set(["waiting", "closing", "error"]),
+  recording: new Set(["waiting", "ready", "closing", "error"]),
+  waiting: new Set(["recording", "playing", "ready", "closing", "error"]),
+  playing: new Set(["ready", "closing", "error"]),
+  closing: new Set(["closed", "error"]),
+  closed: new Set(["connecting"]),
+  error: new Set(["connecting", "closing", "closed"]),
+};
+
+export function canTransitionRealtimeVoiceState(
+  from: RealtimeVoiceState,
+  to: RealtimeVoiceState,
+): boolean {
+  return from === to || ALLOWED_STATE_TRANSITIONS[from].has(to);
 }
 
 export class RealtimeVoiceClient {
@@ -94,9 +118,15 @@ export class RealtimeVoiceClient {
   #playback: PlaybackLike | undefined;
   #playbackChain = Promise.resolve();
   #audioFormat: PcmAudioFormat;
+  #maxFrameBytes = 65_536;
   #sequence = 0;
   #audioFramesSent = 0;
   #receivingAudio = false;
+  #responseAudioStarted = false;
+  #responseAudioEnded = false;
+  #playbackIdle = true;
+  #turnCompleted = false;
+  #turnAudioExpected: boolean | undefined;
   #audioReadyWaiter:
     | {
         turnId: string;
@@ -106,7 +136,9 @@ export class RealtimeVoiceClient {
       }
     | undefined;
   #heartbeatTimer: number | undefined;
-  #lastPongAt = 0;
+  #pendingPing: { eventId: string; sentAt: number } | undefined;
+  #lastServerActivityAt = 0;
+  #responseTimer: number | undefined;
   #destroyed = false;
 
   constructor(options: RealtimeVoiceClientOptions = {}) {
@@ -154,13 +186,30 @@ export class RealtimeVoiceClient {
           payload: { supportedAudioFormats: [this.#audioFormat] },
         }),
       );
+      if (!sameFormat(ready.payload.audioFormat, this.#audioFormat)) {
+        throw new RealtimeClientError(
+          "PROTOCOL_ERROR",
+          "Backend selected an audio format that the client did not offer",
+        );
+      }
       if (ready.payload.maxFrameBytes < ready.payload.audioFormat.frameSamples * 2) {
         throw new RealtimeClientError(
           "PROTOCOL_ERROR",
           "Backend frame limit is smaller than the negotiated PCM frame",
         );
       }
+      if (ready.payload.maxQueuedBytes < ready.payload.audioFormat.frameSamples * 2) {
+        throw new RealtimeClientError(
+          "PROTOCOL_ERROR",
+          "Backend queue limit is smaller than one negotiated PCM frame",
+        );
+      }
+      socket.applyNegotiatedLimits({
+        maxFrameBytes: ready.payload.maxFrameBytes,
+        maxQueuedBytes: ready.payload.maxQueuedBytes,
+      });
       this.#audioFormat = ready.payload.audioFormat;
+      this.#maxFrameBytes = ready.payload.maxFrameBytes;
       this.#setSnapshot({ state: "ready", sessionId: ready.sessionId });
       this.#startHeartbeat(ready.payload.heartbeatMs);
     } catch (cause) {
@@ -171,10 +220,18 @@ export class RealtimeVoiceClient {
 
   async startTurn(): Promise<string> {
     this.#assertState("ready");
+    try {
+      await this.preparePlayback();
+    } catch (cause) {
+      await this.#fail(cause);
+      throw safeRealtimeError(cause);
+    }
+    this.#assertState("ready");
     const socket = this.#requireSocket();
     const sessionId = this.#requireSessionId();
     const turnId = crypto.randomUUID();
     this.#audioFramesSent = 0;
+    this.#resetTurnLifecycle();
     this.#setSnapshot({ state: "waiting", activeTurnId: turnId, lastError: undefined });
     const ready = this.#waitForAudioReady(turnId);
     socket.sendJson(
@@ -204,6 +261,11 @@ export class RealtimeVoiceClient {
     }
   }
 
+  async preparePlayback(): Promise<void> {
+    this.#assertState("ready");
+    await this.#ensurePlayback().prime();
+  }
+
   async stopTurn(): Promise<void> {
     this.#assertState("recording");
     const socket = this.#requireSocket();
@@ -224,6 +286,7 @@ export class RealtimeVoiceClient {
           },
         }),
       );
+      this.#startResponseTimeout();
     } catch (cause) {
       await this.#fail(cause);
       throw safeRealtimeError(cause);
@@ -231,17 +294,34 @@ export class RealtimeVoiceClient {
   }
 
   async interrupt(): Promise<void> {
+    if (this.#snapshot.state === "idle" || this.#snapshot.state === "closed") return;
+    if (this.#snapshot.state === "connecting" || this.#snapshot.state === "handshaking") {
+      throw new RealtimeClientError(
+        "INVALID_STATE",
+        "Disconnect the realtime client while it is connecting",
+        { recoverable: true },
+      );
+    }
     const turnId = this.#snapshot.activeTurnId;
     const sessionId = this.#snapshot.sessionId;
+    let cleanupCause: unknown;
     this.#rejectAudioReady(
       new RealtimeClientError("TURN_INTERRUPTED", "Turn was interrupted", { recoverable: true }),
     );
-    await this.#capture?.stop();
+    try {
+      await this.#capture?.stop();
+    } catch (cause) {
+      cleanupCause = cause;
+    }
     this.#capture = undefined;
     this.#socket?.clearBinaryQueue();
-    await this.#playback?.cancel();
+    try {
+      await this.#playback?.cancel();
+    } catch (cause) {
+      cleanupCause ??= cause;
+    }
     this.#playback = undefined;
-    this.#receivingAudio = false;
+    this.#resetTurnLifecycle();
     if (turnId && sessionId && this.#socket) {
       try {
         this.#socket.sendJson(
@@ -255,8 +335,13 @@ export class RealtimeVoiceClient {
         // A closed socket already interrupted the server-side turn.
       }
     }
+    if (cleanupCause !== undefined) {
+      await this.#fail(cleanupCause);
+      throw safeRealtimeError(cleanupCause);
+    }
+    const wasClosing = this.#snapshot.state === "closing";
     this.#setSnapshot({
-      state: this.#socket && sessionId ? "ready" : "closed",
+      state: wasClosing ? "closing" : this.#socket && sessionId ? "ready" : "closed",
       activeTurnId: undefined,
       queuedPlaybackSeconds: 0,
     });
@@ -265,16 +350,26 @@ export class RealtimeVoiceClient {
   async disconnect(): Promise<void> {
     if (this.#snapshot.state === "closed" || this.#snapshot.state === "idle") return;
     this.#setSnapshot({ state: "closing" });
-    await this.interrupt();
-    await this.#cleanupConnection();
-    this.#setSnapshot({ state: "closed", sessionId: undefined, activeTurnId: undefined });
+    let interruptError: unknown;
+    try {
+      await this.interrupt();
+    } catch (cause) {
+      interruptError = cause;
+    } finally {
+      await this.#cleanupConnection();
+      this.#setSnapshot({ state: "closed", sessionId: undefined, activeTurnId: undefined });
+    }
+    if (interruptError !== undefined) throw safeRealtimeError(interruptError);
   }
 
   async destroy(): Promise<void> {
     if (this.#destroyed) return;
-    await this.disconnect();
-    this.#destroyed = true;
-    this.#listeners.clear();
+    try {
+      await this.disconnect();
+    } finally {
+      this.#destroyed = true;
+      this.#listeners.clear();
+    }
   }
 
   #handleSocketEvent(event: RealtimeSocketEvent): void {
@@ -284,6 +379,7 @@ export class RealtimeVoiceClient {
       return;
     }
     if (event.type === "binary") {
+      this.#lastServerActivityAt = Date.now();
       this.#handleIncomingAudio(event.data);
       return;
     }
@@ -299,11 +395,19 @@ export class RealtimeVoiceClient {
       );
       return;
     }
+    this.#lastServerActivityAt = Date.now();
     this.#handleServerMessage(event.message);
   }
 
   #handleServerMessage(message: ServerMessage): void {
-    if (message.type === "session.ready") return;
+    if (message.type === "session.ready") {
+      if (this.#snapshot.state !== "handshaking") {
+        void this.#fail(
+          new RealtimeClientError("PROTOCOL_ERROR", "Backend repeated the session handshake"),
+        );
+      }
+      return;
+    }
     if (message.sessionId && message.sessionId !== this.#snapshot.sessionId) {
       void this.#fail(
         new RealtimeClientError("PROTOCOL_ERROR", "Backend event belongs to another session"),
@@ -311,7 +415,13 @@ export class RealtimeVoiceClient {
       return;
     }
     if (message.type === "pong") {
-      this.#lastPongAt = Date.now();
+      if (!this.#pendingPing || message.payload.pingEventId !== this.#pendingPing.eventId) {
+        void this.#fail(
+          new RealtimeClientError("PROTOCOL_ERROR", "Backend pong does not match the active ping"),
+        );
+        return;
+      }
+      this.#pendingPing = undefined;
       return;
     }
     if (message.type === "error") {
@@ -344,46 +454,61 @@ export class RealtimeVoiceClient {
         );
         return;
       }
+      if (
+        this.#responseAudioStarted ||
+        this.#receivingAudio ||
+        (this.#turnCompleted && this.#turnAudioExpected === false)
+      ) {
+        void this.#fail(
+          new RealtimeClientError("PROTOCOL_ERROR", "Backend started audio in an invalid order"),
+        );
+        return;
+      }
+      if (this.#snapshot.state !== "waiting") {
+        void this.#fail(
+          new RealtimeClientError("PROTOCOL_ERROR", "Backend started audio before input ended"),
+        );
+        return;
+      }
+      this.#responseAudioStarted = true;
+      this.#responseAudioEnded = false;
       this.#receivingAudio = true;
-      const playbackFactory =
-        this.#options.playbackFactory ??
-        ((options: PcmPlaybackOptions) => new PcmPlaybackQueue(options));
-      this.#playback = playbackFactory({
-        format: this.#audioFormat,
-        onStarted: () => this.#setSnapshot({ state: "playing" }),
-        onIdle: () => {
-          if (!this.#receivingAudio && this.#snapshot.activeTurnId === message.turnId) {
-            this.#setSnapshot({
-              state: "ready",
-              activeTurnId: undefined,
-              queuedPlaybackSeconds: 0,
-            });
-          }
-        },
-      });
+      this.#playbackIdle = true;
+      this.#ensurePlayback();
       return;
     }
     if (message.type === "response.audio.end") {
+      if (!this.#responseAudioStarted || !this.#receivingAudio) {
+        void this.#fail(
+          new RealtimeClientError("PROTOCOL_ERROR", "Backend ended audio before starting it"),
+        );
+        return;
+      }
       this.#receivingAudio = false;
+      this.#responseAudioEnded = true;
       this.#playbackChain = this.#playbackChain.then(() => {
-        if (
-          this.#snapshot.activeTurnId === message.turnId &&
-          (!this.#playback || this.#playback.queuedSeconds === 0)
-        ) {
-          this.#setSnapshot({
-            state: "ready",
-            activeTurnId: undefined,
-            queuedPlaybackSeconds: 0,
-          });
-        }
+        if (!this.#playback || this.#playback.queuedSeconds === 0) this.#playbackIdle = true;
+        this.#tryFinishTurn(message.turnId);
       });
       return;
     }
     if (message.type === "turn.completed") {
-      this.#setSnapshot({ lastTurnResult: Object.freeze({ ...message.payload.result }) });
-      if (!this.#receivingAudio && (!this.#playback || this.#playback.queuedSeconds === 0)) {
-        this.#setSnapshot({ state: "ready", activeTurnId: undefined });
+      if (
+        this.#turnCompleted ||
+        (this.#snapshot.state !== "waiting" && this.#snapshot.state !== "playing") ||
+        message.payload.result.sessionId !== message.sessionId ||
+        message.payload.result.turnId !== message.turnId ||
+        (!message.payload.audioExpected && this.#responseAudioStarted)
+      ) {
+        void this.#fail(
+          new RealtimeClientError("PROTOCOL_ERROR", "Backend completed the turn inconsistently"),
+        );
+        return;
       }
+      this.#turnCompleted = true;
+      this.#turnAudioExpected = message.payload.audioExpected;
+      this.#setSnapshot({ lastTurnResult: Object.freeze({ ...message.payload.result }) });
+      this.#tryFinishTurn(message.turnId);
       return;
     }
     if (message.type === "turn.interrupted") {
@@ -410,13 +535,33 @@ export class RealtimeVoiceClient {
       );
       return;
     }
+    if (data.byteLength > this.#maxFrameBytes) {
+      void this.#fail(
+        new RealtimeClientError("PROTOCOL_ERROR", "Incoming audio exceeds the negotiated limit"),
+      );
+      return;
+    }
+    this.#playbackIdle = false;
     this.#setSnapshot({ bytesReceived: this.#snapshot.bytesReceived + data.byteLength });
+    const playback = this.#playback;
+    const turnId = this.#snapshot.activeTurnId;
     this.#playbackChain = this.#playbackChain
-      .then(() => this.#playback?.enqueue(data))
       .then(() => {
-        this.#setSnapshot({ queuedPlaybackSeconds: this.#playback?.queuedSeconds ?? 0 });
+        if (!turnId || this.#snapshot.activeTurnId !== turnId || this.#playback !== playback)
+          return;
+        return playback.enqueue(data);
       })
-      .catch((cause: unknown) => this.#fail(cause));
+      .then(() => {
+        if (this.#snapshot.activeTurnId === turnId && this.#playback === playback) {
+          this.#setSnapshot({ queuedPlaybackSeconds: playback.queuedSeconds });
+        }
+      })
+      .catch((cause: unknown) => {
+        if (this.#snapshot.activeTurnId === turnId && this.#playback === playback) {
+          return this.#fail(cause);
+        }
+        return undefined;
+      });
   }
 
   #waitForAudioReady(turnId: string): Promise<void> {
@@ -449,24 +594,102 @@ export class RealtimeVoiceClient {
     waiter.reject(reason);
   }
 
+  #ensurePlayback(): PlaybackLike {
+    if (this.#playback) return this.#playback;
+    const playbackFactory =
+      this.#options.playbackFactory ??
+      ((options: PcmPlaybackOptions) => new PcmPlaybackQueue(options));
+    this.#playback = playbackFactory({
+      format: this.#audioFormat,
+      onStarted: () => {
+        if (!this.#responseAudioStarted || !this.#snapshot.activeTurnId) return;
+        this.#playbackIdle = false;
+        if (this.#snapshot.state === "waiting") this.#setSnapshot({ state: "playing" });
+      },
+      onIdle: () => {
+        this.#playbackIdle = true;
+        this.#setSnapshot({ queuedPlaybackSeconds: 0 });
+        const turnId = this.#snapshot.activeTurnId;
+        if (turnId) this.#tryFinishTurn(turnId);
+      },
+    });
+    return this.#playback;
+  }
+
+  #tryFinishTurn(turnId: string): void {
+    if (this.#snapshot.activeTurnId !== turnId || !this.#turnCompleted) return;
+    if (
+      this.#turnAudioExpected &&
+      (!this.#responseAudioStarted || !this.#responseAudioEnded || !this.#playbackIdle)
+    ) {
+      return;
+    }
+    this.#clearResponseTimeout();
+    this.#setSnapshot({
+      state: "ready",
+      activeTurnId: undefined,
+      queuedPlaybackSeconds: 0,
+    });
+    this.#resetTurnLifecycle();
+  }
+
+  #startResponseTimeout(): void {
+    this.#clearResponseTimeout();
+    this.#responseTimer = window.setTimeout(() => {
+      this.#responseTimer = undefined;
+      void this.#fail(
+        new RealtimeClientError("RESPONSE_TIMEOUT", "Backend did not complete the audio turn", {
+          recoverable: true,
+        }),
+      );
+    }, this.#options.responseTimeoutMs ?? 30_000);
+  }
+
+  #clearResponseTimeout(): void {
+    if (this.#responseTimer !== undefined) window.clearTimeout(this.#responseTimer);
+    this.#responseTimer = undefined;
+  }
+
+  #resetTurnLifecycle(): void {
+    this.#clearResponseTimeout();
+    this.#receivingAudio = false;
+    this.#responseAudioStarted = false;
+    this.#responseAudioEnded = false;
+    this.#playbackIdle = true;
+    this.#turnCompleted = false;
+    this.#turnAudioExpected = undefined;
+  }
+
   #startHeartbeat(intervalMs: number): void {
     if (this.#heartbeatTimer !== undefined) window.clearInterval(this.#heartbeatTimer);
-    this.#lastPongAt = Date.now();
+    this.#pendingPing = undefined;
+    this.#lastServerActivityAt = Date.now();
     this.#heartbeatTimer = window.setInterval(() => {
-      if (Date.now() - this.#lastPongAt > intervalMs * 2.5) {
+      const now = Date.now();
+      if (now - this.#lastServerActivityAt > intervalMs * 3) {
         void this.#fail(
-          new RealtimeClientError("SOCKET_CLOSED", "Realtime heartbeat timed out", {
+          new RealtimeClientError("SOCKET_CLOSED", "Realtime server became idle", {
             recoverable: true,
           }),
         );
         return;
       }
+      if (this.#pendingPing) {
+        if (now - this.#pendingPing.sentAt > intervalMs * 2) {
+          void this.#fail(
+            new RealtimeClientError("SOCKET_CLOSED", "Realtime heartbeat timed out", {
+              recoverable: true,
+            }),
+          );
+        }
+        return;
+      }
       const sessionId = this.#snapshot.sessionId;
       if (!sessionId || !this.#socket) return;
       try {
-        this.#socket.sendJson(
-          clientMessage("ping", this.#nextSequence(), { sessionId, payload: {} }),
-        );
+        const ping = clientMessage("ping", this.#nextSequence(), { sessionId, payload: {} });
+        this.#socket.sendJson(ping);
+        this.#pendingPing = { eventId: ping.eventId, sentAt: now };
       } catch (cause) {
         void this.#fail(cause);
       }
@@ -474,6 +697,7 @@ export class RealtimeVoiceClient {
   }
 
   async #fail(cause: unknown): Promise<void> {
+    if (this.#destroyed || this.#snapshot.state === "closed") return;
     const error = safeRealtimeError(cause);
     this.#rejectAudioReady(error);
     await this.#capture?.stop().catch(() => undefined);
@@ -481,16 +705,18 @@ export class RealtimeVoiceClient {
     await this.#playback?.cancel().catch(() => undefined);
     this.#playback = undefined;
     this.#playbackChain = Promise.resolve();
-    this.#receivingAudio = false;
+    this.#resetTurnLifecycle();
     this.#socket?.clearBinaryQueue();
     if (this.#heartbeatTimer !== undefined) window.clearInterval(this.#heartbeatTimer);
     this.#heartbeatTimer = undefined;
+    this.#pendingPing = undefined;
     this.#unsubscribeSocket?.();
     this.#unsubscribeSocket = undefined;
     this.#socket?.close(4003, "client error");
     this.#socket = undefined;
     this.#setSnapshot({
       state: "error",
+      sessionId: undefined,
       activeTurnId: undefined,
       queuedPlaybackSeconds: 0,
       lastError: { code: error.code, message: error.message, recoverable: error.recoverable },
@@ -508,7 +734,9 @@ export class RealtimeVoiceClient {
     this.#capture = undefined;
     await this.#playback?.cancel().catch(() => undefined);
     this.#playback = undefined;
-    this.#receivingAudio = false;
+    this.#playbackChain = Promise.resolve();
+    this.#resetTurnLifecycle();
+    this.#pendingPing = undefined;
   }
 
   #nextSequence(): number {
@@ -518,6 +746,15 @@ export class RealtimeVoiceClient {
   }
 
   #setSnapshot(patch: Partial<RealtimeVoiceSnapshot>): void {
+    if (
+      patch.state !== undefined &&
+      !canTransitionRealtimeVoiceState(this.#snapshot.state, patch.state)
+    ) {
+      throw new RealtimeClientError(
+        "INVALID_STATE",
+        `Invalid realtime state transition ${this.#snapshot.state} → ${patch.state}`,
+      );
+    }
     this.#snapshot = { ...this.#snapshot, ...patch };
     const snapshot = this.getSnapshot();
     for (const listener of this.#listeners) listener(snapshot);
