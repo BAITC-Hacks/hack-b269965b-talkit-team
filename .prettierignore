@@ -3,3 +3,5 @@ node_modules
 dist
 pnpm-lock.yaml
 docs/PRESTART_MANIFEST.json
+data/voice-router
+docs/progress/progress_web_001.md
