@@ -494,7 +494,6 @@ export function attachVoiceRouterSocket(
         turn.abort.signal,
       );
       if (active !== turn || turn.abort.signal.aborted) return;
-      send("route.completed", { sessionId, turnId: turn.id, payload: { result } });
       await streamAnswer(turn, result.answer ?? "", { ...result, dsr });
     }
 

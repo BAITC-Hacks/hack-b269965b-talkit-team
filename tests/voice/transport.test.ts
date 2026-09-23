@@ -154,38 +154,6 @@ test("canonical WebSocket handshake and pings use ordered protocol envelopes", a
   }
 });
 
-test("route.completed carries only the validated router result", () => {
-  const sessionId = randomUUID();
-  const turnId = randomUUID();
-  const result = {
-    sessionId,
-    turnId,
-    selectedText: "Здравствуйте",
-    source: "stt",
-    answer: "Чем могу помочь?",
-    status: "completed",
-    trace: [],
-  };
-  const message = {
-    protocolVersion: PROTOCOL_VERSION,
-    type: "route.completed",
-    eventId: randomUUID(),
-    sequence: 2,
-    occurredAt: new Date().toISOString(),
-    sessionId,
-    turnId,
-    payload: { result },
-  };
-  assert.equal(serverMessageSchema.parse(message).type, "route.completed");
-  assert.equal(
-    serverMessageSchema.safeParse({
-      ...message,
-      payload: { result: { ...result, tts: { status: "completed" } } },
-    }).success,
-    false,
-  );
-});
-
 test("duplicate client sequence emits a protocol error and closes the socket", async () => {
   const client = await connect();
   try {

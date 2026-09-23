@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { turnResultSchema } from "./voice-router.ts";
 
 // One wire contract for the browser client and the Node WebSocket endpoint.
 // Browser -> server binary: one raw PCM16LE frame in the negotiated format.
@@ -195,14 +194,6 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
           waitMs: z.number().nonnegative(),
         })
         .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...envelope,
-      type: z.literal("route.completed"),
-      ...turn,
-      payload: z.object({ result: turnResultSchema }).strict(),
     })
     .strict(),
   z
