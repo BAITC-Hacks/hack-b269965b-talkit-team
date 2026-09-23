@@ -175,6 +175,8 @@ export class YandexStt {
   private backpressured = false;
   private eouTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly pending: PendingUtterance[] = [];
+  private uncommitted: PendingUtterance | undefined;
+  private skipUntilCommit = false;
   private readonly refinements = new Map<
     number,
     { utterance: PendingUtterance; position: number }
@@ -190,6 +192,15 @@ export class YandexStt {
 
   get ready(): boolean {
     return this.connected && this.stream !== undefined;
+  }
+
+  get canStartUtterance(): boolean {
+    return (
+      this.ready &&
+      this.pending.length === 0 &&
+      !this.skipUntilCommit &&
+      this.uncommitted === undefined
+    );
   }
 
   connect(): Promise<void> {
@@ -248,6 +259,8 @@ export class YandexStt {
     this.backpressured = false;
     this.clearEouTimer();
     this.pending.length = 0;
+    this.uncommitted = undefined;
+    this.skipUntilCommit = false;
     this.refinements.clear();
     const stream = this.stream;
     this.stream = undefined;
@@ -267,10 +280,18 @@ export class YandexStt {
 
   sendAudioChunk(audio: Buffer): boolean {
     const stream = this.stream;
-    if (!this.ready || !stream || this.backpressured) return false;
+    if (!this.ready || !stream || this.skipUntilCommit) return false;
     if (audio.length === 0 || audio.length % 2 !== 0) {
       throw new Error("Yandex STT requires nonempty PCM16 audio with complete samples");
     }
+    // Without a provider turn ID, speech emitted before the previous EOU cannot
+    // safely be assigned to the new turn. Let the other STT route handle it.
+    if (this.pending.length > 0) {
+      this.skipUntilCommit = true;
+      return false;
+    }
+    if (this.backpressured) return false;
+    this.uncommitted ??= { id: "", committedAt: 0, fragments: [], completed: false };
     try {
       // A false Node stream write means this frame was accepted into its buffer.
       this.backpressured = !stream.write({ chunk: { data: audio } });
@@ -286,6 +307,10 @@ export class YandexStt {
     if (!this.ready || !stream) throw new Error("Yandex STT is not ready");
     const id = utteranceId.trim();
     if (!id) throw new Error("Yandex STT commit requires utteranceId");
+    if (this.skipUntilCommit) {
+      this.skipUntilCommit = false;
+      throw new Error("Yandex STT previous utterance has not completed");
+    }
     if (this.pending.length >= MAX_PENDING_EOUS) {
       const error = new Error("Yandex STT EOU correlation limit reached");
       this.fail(error);
@@ -294,7 +319,16 @@ export class YandexStt {
     if (this.pending.some((entry) => entry.id === id)) {
       throw new Error("Yandex STT utteranceId is already pending");
     }
-    this.pending.push({ id, committedAt: Date.now(), fragments: [], completed: false });
+    const utterance = this.uncommitted ?? {
+      id: "",
+      committedAt: 0,
+      fragments: [],
+      completed: false,
+    };
+    this.uncommitted = undefined;
+    utterance.id = id;
+    utterance.committedAt = Date.now();
+    this.pending.push(utterance);
     this.scheduleEouTimer();
     try {
       // Register the owner before write: a test stream may acknowledge synchronously.
@@ -326,18 +360,19 @@ export class YandexStt {
       });
     }
     const final = firstAlternative(response.final);
-    if (final && owner) {
+    const fragmentOwner = owner ?? this.uncommitted;
+    if (final && fragmentOwner) {
       const index = finiteNonnegative(response.audio_cursors?.final_index);
       const providerItemId = index === undefined ? undefined : `${sessionId ?? "session"}:${index}`;
-      const position = owner.fragments.length;
-      owner.fragments.push({
+      const position = fragmentOwner.fragments.length;
+      fragmentOwner.fragments.push({
         text: final.text,
         providerItemId,
         languageCode: final.languageCode,
         audioEndMs: finiteNonnegative(response.audio_cursors?.final_time_ms),
       });
       if (index !== undefined) {
-        this.refinements.set(index, { utterance: owner, position });
+        this.refinements.set(index, { utterance: fragmentOwner, position });
         while (this.refinements.size > MAX_REFINEMENT_INDICES) {
           const oldest = this.refinements.keys().next().value;
           if (oldest === undefined) break;

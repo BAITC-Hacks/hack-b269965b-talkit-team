@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { createDsrTurn } from "../../src/server/features/voice/dsr.ts";
 
 test("DSR keeps both final hypotheses and blocks conflicting digits", async () => {
@@ -61,6 +62,46 @@ test("DSR waits briefly for Yandex then resolves once; late results cannot chang
   assert.equal(result.hypotheses.yandex.status, "pending");
 });
 
+test("DSR does not let a Yandex-first final preempt a later OpenAI final", async () => {
+  const turn = createDsrTurn({
+    openaiReady: true,
+    yandexReady: true,
+    finalTimeoutMs: 1_000,
+    secondProviderWaitMs: 10,
+  });
+  turn.record({ provider: "yandex", status: "final", text: "Change my address" });
+  const pending = turn.finish();
+  let resolved = false;
+  void pending.then(() => {
+    resolved = true;
+  });
+  await delay(40);
+  assert.equal(resolved, false);
+
+  turn.record({ provider: "openai", status: "final", text: "Change my billing address" });
+  const result = await pending;
+  assert.equal(result.status, "accepted");
+  assert.equal(result.selectedProvider, "openai");
+  assert.equal(result.selectedText, "Change my billing address");
+  assert.equal(result.degraded, false);
+});
+
+test("DSR waits for a Yandex critical-field check after the OpenAI final", async () => {
+  const turn = createDsrTurn({
+    openaiReady: true,
+    yandexReady: true,
+    finalTimeoutMs: 1_000,
+    secondProviderWaitMs: 100,
+  });
+  turn.record({ provider: "openai", status: "final", text: "Policy 123" });
+  const pending = turn.finish();
+  await delay(20);
+  turn.record({ provider: "yandex", status: "final", text: "Policy 124" });
+  const result = await pending;
+  assert.equal(result.status, "clarify");
+  assert.deepEqual(result.ambiguousFields, ["digits"]);
+});
+
 test("DSR falls back to Yandex on OpenAI failure or bounded wait", async () => {
   const failed = createDsrTurn({ openaiReady: true, yandexReady: true });
   failed.record({ provider: "openai", status: "failed" });
@@ -73,14 +114,15 @@ test("DSR falls back to Yandex on OpenAI failure or bounded wait", async () => {
   const timed = createDsrTurn({
     openaiReady: true,
     yandexReady: true,
-    finalTimeoutMs: 100,
-    secondProviderWaitMs: 10,
+    finalTimeoutMs: 120,
+    secondProviderWaitMs: 5,
   });
   timed.record({ provider: "yandex", status: "final", text: "На казахском" });
   const result = await timed.finish();
   assert.equal(result.status, "accepted");
   assert.equal(result.selectedProvider, "yandex");
   assert.equal(result.hypotheses.openai.status, "pending");
+  assert.ok(result.waitMs >= 100, `Yandex fallback was too early: ${result.waitMs}ms`);
 });
 
 test("DSR times out without final text and cancellation settles pending finish", async () => {

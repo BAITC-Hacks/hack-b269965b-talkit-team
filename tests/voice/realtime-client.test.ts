@@ -5,6 +5,7 @@ import { RealtimeVoiceClient } from "../../src/web/features/voice-router/realtim
 import { PcmMicrophoneCapture } from "../../src/web/features/voice-router/realtime/audio-capture.ts";
 import { PcmPlaybackQueue } from "../../src/web/features/voice-router/realtime/audio-playback.ts";
 import { DEFAULT_AUDIO_FORMAT } from "../../src/shared/voice.ts";
+import { turnResultSchema } from "../../src/shared/voice-router.ts";
 import type {
   PcmCaptureOptions,
   PcmCaptureStats,
@@ -389,6 +390,165 @@ test("late STT remains with the last completed turn, not a newer active turn", a
     );
     assert.equal(client.getSnapshot().lastTurnResult?.selectedText, "second selected");
   } finally {
+    await client.destroy();
+  }
+});
+
+test("TTS failure before audio keeps safe diagnostics and never reports playback", async () => {
+  const socket = new FakeSocket();
+  const decision = {
+    scenarios: [{ scenario_id: "SYS_UNCLEAR", confidence: 0.9, reason: "Требуется уточнение" }],
+    alternatives: [],
+    language: "ru",
+    slots: {},
+    is_continuation: false,
+  };
+  const trace = [
+    {
+      stage: "routing",
+      status: "completed",
+      at: new Date().toISOString(),
+      durationMs: 42,
+    },
+  ];
+  const client = new RealtimeVoiceClient({
+    url: "ws://localhost/api/voice-router/ws",
+    socketFactory: () => {
+      socket.open();
+      return socket as unknown as WebSocket;
+    },
+    captureFactory: () => ({
+      async start() {},
+      async pause() {
+        return { emittedFrames: 0, emittedBytes: 0, droppedSamples: 0 };
+      },
+      async stop() {
+        return { emittedFrames: 0, emittedBytes: 0, droppedSamples: 0 };
+      },
+    }),
+  });
+
+  try {
+    await client.connect();
+    const turnId = await client.startTurn();
+    await client.stopTurn();
+    socket.emit("turn.completed", {
+      sessionId,
+      turnId,
+      payload: {
+        result: {
+          status: "completed",
+          sessionId,
+          turnId,
+          selectedText: "Здравствуйте",
+          source: "stt",
+          decision,
+          trace,
+          answer: "Здравствуйте",
+          dsr: { status: "accepted", selectedText: "Здравствуйте" },
+          tts: { status: "failed", kind: "provider", httpStatus: 422, audioBytesSent: 0 },
+        },
+      },
+    });
+    assert.equal(client.getSnapshot().state, "ready");
+    assert.equal(client.getSnapshot().lastResponseDelivery?.status, "not_played");
+    assert.deepEqual(client.getSnapshot().lastTurnResult?.tts, {
+      status: "failed",
+      kind: "provider",
+      httpStatus: 422,
+      audioBytesSent: 0,
+    });
+    assert.deepEqual(client.getSnapshot().lastTurnResult?.decision, decision);
+    assert.deepEqual(client.getSnapshot().lastTurnResult?.trace, trace);
+    const { dsr: _dsr, tts: _tts, ...routerResult } = client.getSnapshot().lastTurnResult ?? {};
+    assert.equal(turnResultSchema.safeParse(routerResult).success, true);
+    assert.equal(socket.sentTypes().includes("response.audio.started"), false);
+  } finally {
+    await client.destroy();
+  }
+});
+
+test("VAD speech stop ends only the matching recording turn once", async () => {
+  const socket = new FakeSocket();
+  let pauseCount = 0;
+  let releaseFirstPause: (() => void) | undefined;
+  const firstPause = new Promise<void>((resolve) => {
+    releaseFirstPause = resolve;
+  });
+  const client = new RealtimeVoiceClient({
+    url: "ws://localhost/api/voice-router/ws",
+    socketFactory: () => {
+      socket.open();
+      return socket as unknown as WebSocket;
+    },
+    captureFactory: () => ({
+      async start() {},
+      async pause() {
+        pauseCount += 1;
+        if (pauseCount === 1) await firstPause;
+        return { emittedFrames: 0, emittedBytes: 0, droppedSamples: 0 };
+      },
+      async stop() {
+        return { emittedFrames: 0, emittedBytes: 0, droppedSamples: 0 };
+      },
+    }),
+  });
+  const stopped = (turnId: string) => {
+    socket.emit("vad.speech_stopped", {
+      sessionId,
+      turnId,
+      payload: { providerItemId: "provider-item", audioEndMs: 800 },
+    });
+  };
+  const stopCount = () => socket.sentTypes().filter((type) => type === "audio.stop").length;
+
+  try {
+    await client.connect();
+    const firstTurnId = await client.startTurn();
+    stopped(crypto.randomUUID());
+    assert.equal(client.getSnapshot().state, "recording");
+    stopped(firstTurnId);
+    const manualStop = client.stopTurn();
+    stopped(firstTurnId);
+    assert.equal(pauseCount, 1);
+    assert.equal(stopCount(), 0);
+    releaseFirstPause?.();
+    await manualStop;
+    assert.equal(stopCount(), 1);
+    assert.equal(client.getSnapshot().state, "waiting");
+    stopped(firstTurnId);
+    assert.equal(stopCount(), 1);
+    socket.emit("turn.completed", {
+      sessionId,
+      turnId: firstTurnId,
+      payload: { result: { status: "completed" } },
+    });
+
+    const secondTurnId = await client.startTurn();
+    const secondManualStop = client.stopTurn();
+    stopped(secondTurnId);
+    await secondManualStop;
+    assert.equal(pauseCount, 2);
+    assert.equal(stopCount(), 2);
+    socket.emit("turn.completed", {
+      sessionId,
+      turnId: secondTurnId,
+      payload: { result: { status: "completed" } },
+    });
+
+    const thirdTurnId = await client.startTurn();
+    stopped(secondTurnId);
+    assert.equal(client.getSnapshot().state, "recording");
+    await client.stopTurn();
+    assert.equal(stopCount(), 3);
+    socket.emit("turn.completed", {
+      sessionId,
+      turnId: thirdTurnId,
+      payload: { result: { status: "completed" } },
+    });
+    assert.equal(client.getSnapshot().state, "ready");
+  } finally {
+    releaseFirstPause?.();
     await client.destroy();
   }
 });

@@ -18,10 +18,10 @@
 ## Текущий технический контекст
 
 - Phase 0 присутствует в коде: набор данных, общие контракты, catalog loader, server-only конфигурация и baseline-тесты.
-- Серверная часть Phase 1 частично реализована: HTTP turn/reset, адаптер `gpt-realtime`, структурированный tool call, валидация, policy, in-memory session state и ответ по привязанным фактам.
-- Текущая Vue-страница остаётся starter Echo; продуктовый Voice Router UI не подключён.
-- Браузерные PCM/WebSocket-модули подготовлены отдельно, но server WebSocket, DSR, STT и TTS ещё не образуют рабочий контур.
-- Исполнитель mock-действий, полная trace-панель, eval runner и публичный deployment не завершены.
+- Локальный текстовый путь включает HTTP turn/reset, `gpt-realtime`, структурированный tool call, валидацию, policy, состояние сессии и ответ по привязанным фактам.
+- `App.vue` открывает Voice Router UI с голосовым звонком, резервным текстовым вводом и трассировкой.
+- Browser PCM/WebSocket соединён с серверным WebSocket, OpenAI/Yandex STT, DSR и ElevenLabs V3 TTS. Живой браузерный звонок с провайдерами ещё не подтверждён.
+- Есть eval runner, но нет подтверждённых live-метрик; mock-действия, полный диалог и публичный deployment не завершены.
 
 Детали и доказательства не дублируются здесь: проверяйте `STATUS.md`, актуальный код и записи `progress/`.
 
