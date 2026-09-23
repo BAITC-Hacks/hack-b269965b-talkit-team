@@ -37,7 +37,7 @@ export const routeScenarioSchema = z
   .object({
     scenario_id: z.string().min(1),
     confidence: z.number().min(0).max(1),
-    reason: z.string().min(1),
+    reason: z.string().trim().min(1).max(500),
   })
   .strict();
 
@@ -45,11 +45,29 @@ export const routeAlternativeSchema = routeScenarioSchema.omit({ reason: true })
 
 export const routeDecisionSchema = z
   .object({
-    scenarios: z.array(routeScenarioSchema),
-    alternatives: z.array(routeAlternativeSchema),
+    scenarios: z.array(routeScenarioSchema).min(1).max(8),
+    alternatives: z.array(routeAlternativeSchema).max(8),
     language: voiceRouterLanguageSchema,
     slots: z.record(z.string(), z.unknown()),
     is_continuation: z.boolean(),
+  })
+  .strict();
+
+export const turnOutcomeSchema = z.enum([
+  "respond",
+  "clarify",
+  "handoff",
+  "out_of_scope",
+  "goodbye",
+]);
+
+export const turnPlanSchema = z
+  .object({
+    outcome: turnOutcomeSchema,
+    orderedScenarioIds: z.array(z.string().min(1)).min(1).max(8),
+    knowledgeRefs: z.array(z.string().min(1)).max(24),
+    missingSlots: z.array(z.string().min(1)).max(43),
+    nextQuestion: z.string().trim().min(1).max(500).optional(),
   })
   .strict();
 
@@ -73,13 +91,23 @@ export const turnResultSchema = z
     detectedLanguage: voiceRouterLanguageSchema.optional(),
     responseLanguage: responseLanguageSchema.optional(),
     decision: routeDecisionSchema.optional(),
+    plan: turnPlanSchema.optional(),
     answer: z.string().optional(),
     status: z.enum(["completed", "unavailable", "failed"]),
     trace: z.array(traceEventSchema),
   })
   .strict();
 
+export const resetSessionInputSchema = z.object({ sessionId: z.uuid() }).strict();
+export const resetSessionResultSchema = z
+  .object({ sessionId: z.uuid(), reset: z.boolean() })
+  .strict();
+
 export type TurnInput = z.infer<typeof turnInputSchema>;
 export type RouteDecision = z.infer<typeof routeDecisionSchema>;
+export type TurnPlan = z.infer<typeof turnPlanSchema>;
+export type TurnOutcome = z.infer<typeof turnOutcomeSchema>;
 export type TurnResult = z.infer<typeof turnResultSchema>;
 export type TraceEvent = z.infer<typeof traceEventSchema>;
+export type ResetSessionInput = z.infer<typeof resetSessionInputSchema>;
+export type ResetSessionResult = z.infer<typeof resetSessionResultSchema>;
