@@ -2,11 +2,13 @@ import { createServer } from "node:http";
 import { toNodeListener } from "h3";
 import sirv from "sirv";
 import { createApi } from "./app.ts";
+import type { VoiceRouterController } from "./features/voice-router/controller.ts";
 
 export function createHttpServer(options: {
   appName: string;
   webRoot?: string;
   logRequests?: boolean;
+  voiceRouterController?: VoiceRouterController;
 }) {
   const api = toNodeListener(createApi(options));
   const staticFiles = options.webRoot

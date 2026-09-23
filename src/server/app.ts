@@ -9,9 +9,18 @@ import {
   setResponseStatus,
 } from "h3";
 import { registerEchoRoutes } from "./features/echo/routes.ts";
+import {
+  createDefaultVoiceRouterController,
+  type VoiceRouterController,
+} from "./features/voice-router/controller.ts";
+import { registerVoiceRouterRoutes } from "./features/voice-router/routes.ts";
 import { healthSchema } from "../shared/contracts.ts";
 
-export function createApi(options: { appName: string; logRequests?: boolean }) {
+export function createApi(options: {
+  appName: string;
+  logRequests?: boolean;
+  voiceRouterController?: VoiceRouterController;
+}) {
   const app = createApp({
     debug: false,
     onError(error, event) {
@@ -82,6 +91,10 @@ export function createApi(options: { appName: string; logRequests?: boolean }) {
     }),
   );
   registerEchoRoutes(router);
+  registerVoiceRouterRoutes(
+    router,
+    options.voiceRouterController ?? createDefaultVoiceRouterController(process.env),
+  );
   app.use(router);
   app.use(
     defineEventHandler(() => {
