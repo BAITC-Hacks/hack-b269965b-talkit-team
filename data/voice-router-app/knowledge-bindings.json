@@ -1,0 +1,42 @@
+{
+  "meta": {
+    "dataset": "Voice Router - Saqta Insurance",
+    "version": "1.0",
+    "as_of_date": "2026-10-01"
+  },
+  "bindings": {
+    "SC01": ["products.ogpo"],
+    "SC02": ["products.ogpo.policy_delivery"],
+    "SC03": ["products.casco"],
+    "SC06": ["products.travel"],
+    "SC07": ["products.property"],
+    "SC08": ["products.accident"],
+    "SC09": ["products.dms"],
+    "SC10": ["company.contact_center"],
+    "SC11": ["claims.road_accident_now", "company.contact_center"],
+    "SC12": ["claims.documents.ogpo_victim", "claims.submission"],
+    "SC13": ["claims.documents.casco", "claims.submission"],
+    "SC14": ["claims.documents.property", "claims.submission"],
+    "SC15": ["claims.documents.travel", "claims.submission", "company.contact_center"],
+    "SC16": ["claims.documents.accident", "claims.submission"],
+    "SC17": ["claims.decision_time", "claims.payout_time"],
+    "SC18": ["claims.documents"],
+    "SC19": ["claims.dispute"],
+    "SC20": ["inspection_points"],
+    "SC21": ["products.dms", "clinics"],
+    "SC22": ["products.dms.packages"],
+    "SC23": ["clinics"],
+    "SC24": ["products.dms.e_card"],
+    "SC28": ["cancellation"],
+    "SC30": ["payments"],
+    "SC31": ["payments"],
+    "SC32": ["bonus_malus"],
+    "SC33": ["offices", "company.contact_center"],
+    "SC34": ["app_help"],
+    "SC35": ["complaints"],
+    "SC36": ["company.contact_center"],
+    "SC37": ["company.contact_center"],
+    "SC38": ["fraud_policy", "company.contact_center"],
+    "SC39": ["documents_available"]
+  }
+}
