@@ -1,0 +1,326 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  loadVoiceRouterCatalog,
+  parseCatalogRouteDecision,
+} from "../src/server/features/voice-router/catalog.ts";
+import { createVoiceRouterController } from "../src/server/features/voice-router/controller.ts";
+import {
+  ModelProviderError,
+  type VoiceRouterModelSession,
+} from "../src/server/features/voice-router/model.ts";
+import {
+  buildTurnPlan,
+  type RouterSessionState,
+} from "../src/server/features/voice-router/policy.ts";
+import { routeTurn } from "../src/server/features/voice-router/router.ts";
+import { SessionConflictError } from "../src/server/features/voice-router/state.ts";
+import type { RouteDecision, TurnInput } from "../src/shared/voice-router.ts";
+
+const catalog = loadVoiceRouterCatalog();
+const sessionId = "123e4567-e89b-42d3-a456-426614174100";
+const turnId = "123e4567-e89b-42d3-a456-426614174101";
+
+function decision(
+  scenarios: RouteDecision["scenarios"],
+  alternatives: RouteDecision["alternatives"] = [],
+): RouteDecision {
+  return {
+    scenarios,
+    alternatives,
+    language: "ru",
+    slots: {},
+    is_continuation: false,
+  };
+}
+
+function state(): RouterSessionState {
+  return { lowConfidenceStreak: 0, activeScenarioIds: [], slots: {} };
+}
+
+function functionCall(value: unknown) {
+  return { name: "route_turn", arguments: JSON.stringify(value) };
+}
+
+function fakeSession(calls: Array<{ name: string; arguments: string }>, answer = "Ответ") {
+  let callCount = 0;
+  let closed = false;
+  const session: VoiceRouterModelSession = {
+    async callFunction() {
+      const call = calls[callCount++];
+      if (!call) throw new Error("Unexpected function call");
+      return call;
+    },
+    async generateText() {
+      return answer;
+    },
+    close() {
+      closed = true;
+    },
+  };
+  return {
+    session,
+    get callCount() {
+      return callCount;
+    },
+    get closed() {
+      return closed;
+    },
+  };
+}
+
+test("catalog prompt is generated from source data without evaluation labels", () => {
+  assert.match(catalog.routingPrompt, /SC01/);
+  assert.match(catalog.routingPrompt, /SYS_UNCLEAR/);
+  assert.doesNotMatch(catalog.routingPrompt, /U001|expected|dev_utterances/);
+  assert.equal(catalog.promptHash.length, 64);
+  assert.ok((catalog.knowledgeFactsByScenario.get("SC11")?.length ?? 0) > 0);
+});
+
+test("catalog validation rejects duplicate selections, overlaps and irrelevant slots", () => {
+  const base = decision([{ scenario_id: "SC30", confidence: 0.9, reason: "payment" }]);
+  assert.throws(() =>
+    parseCatalogRouteDecision({ ...base, scenarios: [...base.scenarios, ...base.scenarios] }),
+  );
+  assert.throws(() =>
+    parseCatalogRouteDecision({
+      ...base,
+      alternatives: [{ scenario_id: "SC30", confidence: 0.2 }],
+    }),
+  );
+  assert.throws(() => parseCatalogRouteDecision({ ...base, slots: { iin: "123456789012" } }));
+  assert.throws(() =>
+    parseCatalogRouteDecision({ ...base, slots: { payment_date: "not-a-date" } }),
+  );
+});
+
+test("router repairs invalid model output once and preserves the canonical decision", async () => {
+  const valid = {
+    ...decision([{ scenario_id: "SC31", confidence: 0.88, reason: "payment methods" }]),
+    response_language: "ru",
+  };
+  const fake = fakeSession([
+    functionCall({
+      ...valid,
+      scenarios: [{ scenario_id: "SC99", confidence: 1, reason: "bad" }],
+    }),
+    functionCall(valid),
+  ]);
+  const routed = await routeTurn({
+    text: "Как оплатить полис?",
+    context: { activeScenarioIds: [], slots: {} },
+    catalog,
+    session: fake.session,
+  });
+  assert.equal(fake.callCount, 2);
+  assert.equal(routed.decision.scenarios[0]?.scenario_id, "SC31");
+  assert.equal("response_language" in routed.decision, false);
+});
+
+test("router stops after one failed repair", async () => {
+  const fake = fakeSession([
+    { name: "route_turn", arguments: "{" },
+    { name: "route_turn", arguments: "{" },
+  ]);
+  await assert.rejects(
+    routeTurn({
+      text: "???",
+      context: { activeScenarioIds: [], slots: {} },
+      catalog,
+      session: fake.session,
+    }),
+    (error: unknown) => error instanceof ModelProviderError && error.kind === "output",
+  );
+  assert.equal(fake.callCount, 2);
+});
+
+test("router repairs a missing function call but never retries transport errors", async () => {
+  const valid = {
+    ...decision([{ scenario_id: "SC31", confidence: 0.9, reason: "payment" }]),
+    response_language: "ru",
+  };
+  let outputAttempts = 0;
+  const outputSession: VoiceRouterModelSession = {
+    async callFunction() {
+      outputAttempts += 1;
+      if (outputAttempts === 1) throw new ModelProviderError("output", "missing call");
+      return functionCall(valid);
+    },
+    async generateText() {
+      return "unused";
+    },
+    close() {},
+  };
+  const repaired = await routeTurn({
+    text: "Как оплатить?",
+    context: { activeScenarioIds: [], slots: {} },
+    catalog,
+    session: outputSession,
+  });
+  assert.equal(repaired.decision.scenarios[0]?.scenario_id, "SC31");
+  assert.equal(outputAttempts, 2);
+
+  let transportAttempts = 0;
+  const transportSession: VoiceRouterModelSession = {
+    async callFunction() {
+      transportAttempts += 1;
+      throw new ModelProviderError("transport", "offline");
+    },
+    async generateText() {
+      return "unused";
+    },
+    close() {},
+  };
+  await assert.rejects(
+    routeTurn({
+      text: "Как оплатить?",
+      context: { activeScenarioIds: [], slots: {} },
+      catalog,
+      session: transportSession,
+    }),
+    (error: unknown) => error instanceof ModelProviderError && error.kind === "transport",
+  );
+  assert.equal(transportAttempts, 1);
+});
+
+test("policy orders urgent intents from catalog and applies exact confidence boundaries", () => {
+  const urgentPlan = buildTurnPlan({
+    decision: decision([
+      { scenario_id: "SC01", confidence: 0.9, reason: "quote" },
+      { scenario_id: "SC11", confidence: 0.8, reason: "accident now" },
+    ]),
+    responseLanguage: "ru",
+    catalog,
+    state: state(),
+  });
+  assert.deepEqual(urgentPlan.orderedScenarioIds, ["SC11", "SC01"]);
+  assert.equal(urgentPlan.outcome, "respond");
+
+  const high = buildTurnPlan({
+    decision: decision([{ scenario_id: "SC31", confidence: 0.75, reason: "payment" }]),
+    responseLanguage: "ru",
+    catalog,
+    state: state(),
+  });
+  assert.equal(high.outcome, "respond");
+
+  const medium = buildTurnPlan({
+    decision: decision(
+      [{ scenario_id: "SC31", confidence: 0.45, reason: "maybe payment" }],
+      [{ scenario_id: "SC32", confidence: 0.4 }],
+    ),
+    responseLanguage: "ru",
+    catalog,
+    state: state(),
+  });
+  assert.equal(medium.outcome, "clarify");
+});
+
+test("two consecutive low-confidence turns hand off", () => {
+  const sessionState = state();
+  const low = decision([{ scenario_id: "SC31", confidence: 0.44, reason: "weak signal" }]);
+  const first = buildTurnPlan({
+    decision: low,
+    responseLanguage: "ru",
+    catalog,
+    state: sessionState,
+  });
+  const second = buildTurnPlan({
+    decision: low,
+    responseLanguage: "ru",
+    catalog,
+    state: sessionState,
+  });
+  assert.equal(first.outcome, "clarify");
+  assert.equal(second.outcome, "handoff");
+});
+
+test("controller uses one production path and caches a duplicate turn", async () => {
+  const routed = {
+    ...decision([{ scenario_id: "SC31", confidence: 0.91, reason: "payment question" }]),
+    response_language: "ru",
+  };
+  const fake = fakeSession([functionCall(routed)], "Оплатить можно разрешённым способом из базы.");
+  let opened = 0;
+  const controller = createVoiceRouterController({
+    catalog,
+    provider: {
+      model: "fake-realtime-for-unit-test",
+      async openSession() {
+        opened += 1;
+        return fake.session;
+      },
+    },
+  });
+  const input: TurnInput = {
+    sessionId,
+    turnId,
+    text: "Как оплатить полис?",
+    source: "text",
+  };
+  const first = controller.handleTurn(input);
+  const duplicate = controller.handleTurn(input);
+  const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+  assert.strictEqual(firstResult, duplicateResult);
+  assert.equal(firstResult.status, "completed");
+  assert.equal(firstResult.plan?.outcome, "respond");
+  assert.equal(opened, 1);
+  assert.equal(fake.callCount, 1);
+  assert.equal(fake.closed, true);
+  assert.deepEqual(
+    firstResult.trace.filter((event) => event.status === "completed").map((event) => event.stage),
+    ["provider", "routing", "planning", "answer"],
+  );
+
+  await assert.rejects(
+    controller.handleTurn({ ...input, text: "Другой текст" }),
+    SessionConflictError,
+  );
+});
+
+test("controller reports missing provider honestly", async () => {
+  const controller = createVoiceRouterController({ catalog });
+  const result = await controller.handleTurn({
+    sessionId,
+    turnId: "123e4567-e89b-42d3-a456-426614174102",
+    text: "Как оплатить полис?",
+    source: "text",
+  });
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.answer, undefined);
+  assert.equal(result.trace.at(-1)?.detail, "provider_not_configured");
+});
+
+test("controller retains a validated route when answer generation fails", async () => {
+  const routed = {
+    ...decision([{ scenario_id: "SC31", confidence: 0.91, reason: "payment question" }]),
+    response_language: "ru",
+  };
+  const controller = createVoiceRouterController({
+    catalog,
+    provider: {
+      model: "fake-realtime-for-unit-test",
+      async openSession() {
+        return {
+          async callFunction() {
+            return functionCall(routed);
+          },
+          async generateText() {
+            throw new ModelProviderError("output", "no text");
+          },
+          close() {},
+        };
+      },
+    },
+  });
+  const result = await controller.handleTurn({
+    sessionId,
+    turnId: "123e4567-e89b-42d3-a456-426614174103",
+    text: "Как оплатить полис?",
+    source: "text",
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.decision?.scenarios[0]?.scenario_id, "SC31");
+  assert.equal(result.plan?.outcome, "respond");
+  assert.equal(result.answer, undefined);
+});

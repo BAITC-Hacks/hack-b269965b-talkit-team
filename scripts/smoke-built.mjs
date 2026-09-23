@@ -1,7 +1,14 @@
 import { spawn } from "node:child_process";
 import { smoke } from "./smoke-lib.mjs";
 const child = spawn(process.execPath, ["dist/server/index.js"], {
-  env: { ...process.env, NODE_ENV: "production", HOST: "127.0.0.1", PORT: "0" },
+  env: {
+    ...process.env,
+    NODE_ENV: "production",
+    HOST: "127.0.0.1",
+    PORT: "0",
+    // Built smoke must stay deterministic and must never spend provider quota.
+    OPENAI_API_KEY: "",
+  },
   stdio: ["ignore", "pipe", "inherit"],
 });
 try {

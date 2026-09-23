@@ -23,6 +23,7 @@
     "start": "node --env-file-if-exists=.env dist/server/index.js",
     "smoke": "node scripts/smoke.mjs",
     "smoke:built": "node scripts/smoke-built.mjs",
+    "eval:router": "node --env-file-if-exists=.env scripts/eval-router.mjs",
     "verify": "pnpm run doctor && pnpm run format:check && pnpm run check && pnpm run build && pnpm run smoke:built",
     "snapshot": "node scripts/snapshot.mjs"
   },

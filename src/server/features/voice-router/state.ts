@@ -10,7 +10,8 @@ interface SessionRecord {
   state: RouterSessionState;
   turns: Map<string, TurnRecord>;
   tail: Promise<void>;
-  active?: AbortController;
+  controller: AbortController;
+  pending: number;
   touchedAt: number;
 }
 
@@ -18,6 +19,13 @@ export class SessionConflictError extends Error {
   constructor() {
     super("turnId was already used with different input");
     this.name = "SessionConflictError";
+  }
+}
+
+export class SessionCapacityError extends Error {
+  constructor() {
+    super("Voice router session capacity is exhausted");
+    this.name = "SessionCapacityError";
   }
 }
 
@@ -48,6 +56,8 @@ export class VoiceRouterSessionStore {
         state: { lowConfidenceStreak: 0, activeScenarioIds: [], slots: {} },
         turns: new Map(),
         tail: Promise.resolve(),
+        controller: new AbortController(),
+        pending: 0,
         touchedAt: Date.now(),
       };
       this.#sessions.set(input.sessionId, record);
@@ -61,16 +71,17 @@ export class VoiceRouterSessionStore {
     }
 
     const current = record;
-    const result = current.tail.catch(() => undefined).then(async () => {
-      const controller = new AbortController();
-      current.active = controller;
-      try {
-        return await task(current.state, controller.signal);
-      } finally {
-        if (current.active === controller) delete current.active;
-        current.touchedAt = Date.now();
-      }
-    });
+    current.pending += 1;
+    const result = current.tail
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          return await task(current.state, current.controller.signal);
+        } finally {
+          current.pending -= 1;
+          current.touchedAt = Date.now();
+        }
+      });
     current.tail = result.then(
       () => undefined,
       () => undefined,
@@ -87,20 +98,22 @@ export class VoiceRouterSessionStore {
   reset(sessionId: string): boolean {
     const record = this.#sessions.get(sessionId);
     if (!record) return false;
-    record.active?.abort(new Error("Session reset"));
+    record.controller.abort(new Error("Session reset"));
     return this.#sessions.delete(sessionId);
   }
 
   #evictExpired() {
     const cutoff = Date.now() - this.#options.ttlMs;
     for (const [sessionId, record] of this.#sessions) {
-      if (record.touchedAt < cutoff && !record.active) this.#sessions.delete(sessionId);
+      if (record.touchedAt < cutoff && record.pending === 0) this.#sessions.delete(sessionId);
     }
   }
 
   #evictOldestIfFull() {
     if (this.#sessions.size < this.#options.maxSessions) return;
-    const inactive = [...this.#sessions].find(([, record]) => !record.active);
-    if (inactive) this.#sessions.delete(inactive[0]);
+    const inactive = [...this.#sessions].find(([, record]) => record.pending === 0);
+    if (!inactive) throw new SessionCapacityError();
+    inactive[1].controller.abort(new Error("Session evicted"));
+    this.#sessions.delete(inactive[0]);
   }
 }

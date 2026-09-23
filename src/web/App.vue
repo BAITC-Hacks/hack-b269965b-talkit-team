@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import EchoPage from "./pages/EchoPage.vue";
+import VoiceRouterPage from "./pages/VoiceRouterPage.vue";
 </script>
+
 <template>
-  <EchoPage />
+  <VoiceRouterPage />
 </template>

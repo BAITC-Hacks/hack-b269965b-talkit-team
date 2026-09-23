@@ -6,7 +6,7 @@ import { createSSRApp, type Component } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { createServer } from "vite";
 
-test("App.vue compiles and renders its initial state", async () => {
+test("App.vue compiles and renders the voice router initial state", async () => {
   const server = await createServer({
     appType: "custom",
     configFile: false,
@@ -21,11 +21,11 @@ test("App.vue compiles and renders its initial state", async () => {
     const html = await renderToString(createSSRApp(module.default));
 
     assert.match(html, /Проверяем API/);
-    assert.match(html, /Сәлем, HackAlem!/);
-    assert.match(html, /Тестовое сообщение/);
-    assert.match(html, /<textarea\b[^>]*\brows="5"[^>]*\baria-describedby="message-help"/);
+    assert.match(html, /Один вход/);
+    assert.match(html, /Сообщение клиента/);
+    assert.match(html, /<textarea\b[^>]*\brows="6"[^>]*\baria-describedby="router-help"/);
     assert.match(html, /<button\b[^>]*\btype="submit"[^>]*\baria-busy="false"/);
-    assert.match(html, /Здесь появится настоящий ответ API/);
+    assert.match(html, /Здесь появятся ответ, причины выбора, альтернативы и измеренное время/);
   } finally {
     await server.close();
   }

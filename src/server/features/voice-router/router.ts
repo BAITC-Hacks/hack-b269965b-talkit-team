@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { responseLanguageSchema, routeDecisionSchema, type RouteDecision } from "../../../shared/voice-router.ts";
+import {
+  responseLanguageSchema,
+  routeDecisionSchema,
+  type RouteDecision,
+} from "../../../shared/voice-router.ts";
 import { parseCatalogRouteDecision, type VoiceRouterCatalog } from "./catalog.ts";
 import { ModelProviderError, type FunctionTool, type VoiceRouterModelSession } from "./model.ts";
 
@@ -77,7 +81,9 @@ function validationSummary(error: unknown): string {
       .map((issue) => `${issue.path.join(".") || "result"}: ${issue.message}`)
       .join("; ");
   }
-  return error instanceof SyntaxError ? "arguments are not valid JSON" : "catalog validation failed";
+  return error instanceof SyntaxError
+    ? "arguments are not valid JSON"
+    : "catalog validation failed";
 }
 
 function parseFunctionCall(
@@ -105,25 +111,26 @@ export async function routeTurn(input: {
     user_text: input.text,
     session_context: input.context,
   });
-  const call = await input.session.callFunction({
-    instructions: input.catalog.routingPrompt,
-    text: payload,
-    tool,
-    ...(input.signal ? { signal: input.signal } : {}),
-  });
-
-  try {
-    return parseFunctionCall(call, input.catalog);
-  } catch (firstError) {
-    const repaired = await input.session.callFunction({
-      instructions: `${input.catalog.routingPrompt}\nThe previous function call was invalid (${validationSummary(firstError)}). Return a completely new route_turn call that satisfies the schema and catalog.`,
+  const attempt = async (instructions: string) => {
+    const call = await input.session.callFunction({
+      instructions,
       text: payload,
       tool,
       ...(input.signal ? { signal: input.signal } : {}),
     });
+    return parseFunctionCall(call, input.catalog);
+  };
+
+  try {
+    return await attempt(input.catalog.routingPrompt);
+  } catch (firstError) {
+    if (firstError instanceof ModelProviderError && firstError.kind !== "output") throw firstError;
     try {
-      return parseFunctionCall(repaired, input.catalog);
+      return await attempt(
+        `${input.catalog.routingPrompt}\nThe previous function call was invalid (${validationSummary(firstError)}). Return a completely new route_turn call that satisfies the schema and catalog.`,
+      );
     } catch (cause) {
+      if (cause instanceof ModelProviderError && cause.kind !== "output") throw cause;
       throw new ModelProviderError("output", "Router output remained invalid after one repair", {
         cause,
       });

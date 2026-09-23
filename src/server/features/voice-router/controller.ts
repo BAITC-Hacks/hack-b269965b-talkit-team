@@ -1,15 +1,13 @@
 import {
   turnInputSchema,
   turnResultSchema,
+  type RouteDecision,
   type TraceEvent,
   type TurnInput,
+  type TurnPlan,
   type TurnResult,
 } from "../../../shared/voice-router.ts";
-import {
-  getKnowledgeFacts,
-  loadVoiceRouterCatalog,
-  type VoiceRouterCatalog,
-} from "./catalog.ts";
+import { getKnowledgeFacts, loadVoiceRouterCatalog, type VoiceRouterCatalog } from "./catalog.ts";
 import { ModelProviderError, type VoiceRouterModelProvider } from "./model.ts";
 import { createOpenAiRealtimeProvider } from "./openai-realtime.ts";
 import { buildTurnPlan, type RouterSessionState } from "./policy.ts";
@@ -79,7 +77,10 @@ function responseContext(
   });
 }
 
-function answerInstructions(language: "ru" | "kk", outcome: ReturnType<typeof buildTurnPlan>["outcome"]) {
+function answerInstructions(
+  language: "ru" | "kk",
+  outcome: ReturnType<typeof buildTurnPlan>["outcome"],
+) {
   return [
     `Reply in ${language === "kk" ? "Kazakh" : "Russian"}.`,
     "Write one or two concise sentences grounded only in the supplied scenario cards and knowledge facts.",
@@ -92,23 +93,42 @@ function answerInstructions(language: "ru" | "kk", outcome: ReturnType<typeof bu
   ].join(" ");
 }
 
-function failedResult(input: TurnInput, trace: TraceEvent[], status: "unavailable" | "failed") {
+function failedResult(
+  input: TurnInput,
+  trace: TraceEvent[],
+  status: "unavailable" | "failed",
+  partial: {
+    decision?: RouteDecision;
+    responseLanguage?: "ru" | "kk";
+    plan?: TurnPlan;
+  } = {},
+) {
   return turnResultSchema.parse({
     sessionId: input.sessionId,
     turnId: input.turnId,
     selectedText: input.text,
     source: input.source,
     ...(input.stt ? { stt: input.stt } : {}),
+    ...(partial.decision
+      ? {
+          detectedLanguage: partial.decision.language,
+          responseLanguage: partial.responseLanguage,
+          decision: partial.decision,
+        }
+      : {}),
+    ...(partial.plan ? { plan: partial.plan } : {}),
     status,
     trace,
   });
 }
 
-export function createVoiceRouterController(options: {
-  provider?: VoiceRouterModelProvider;
-  catalog?: VoiceRouterCatalog;
-  sessions?: VoiceRouterSessionStore;
-} = {}): VoiceRouterController {
+export function createVoiceRouterController(
+  options: {
+    provider?: VoiceRouterModelProvider;
+    catalog?: VoiceRouterCatalog;
+    sessions?: VoiceRouterSessionStore;
+  } = {},
+): VoiceRouterController {
   const catalog = options.catalog ?? loadVoiceRouterCatalog();
   const sessions = options.sessions ?? new VoiceRouterSessionStore();
 
@@ -125,6 +145,8 @@ export function createVoiceRouterController(options: {
         }
 
         let modelSession: Awaited<ReturnType<VoiceRouterModelProvider["openSession"]>> | undefined;
+        let routed: Awaited<ReturnType<typeof routeTurn>> | undefined;
+        let plan: TurnPlan | undefined;
         try {
           const connectionStarted = traceStart(trace, "provider");
           try {
@@ -136,7 +158,6 @@ export function createVoiceRouterController(options: {
           }
 
           const routingStarted = traceStart(trace, "routing");
-          let routed: Awaited<ReturnType<typeof routeTurn>>;
           try {
             routed = await routeTurn({
               text: input.text,
@@ -149,14 +170,20 @@ export function createVoiceRouterController(options: {
               session: modelSession,
               signal,
             });
-            traceEnd(trace, "routing", routingStarted, "completed", catalog.promptHash.slice(0, 12));
+            traceEnd(
+              trace,
+              "routing",
+              routingStarted,
+              "completed",
+              catalog.promptHash.slice(0, 12),
+            );
           } catch (error) {
             traceEnd(trace, "routing", routingStarted, "failed", "routing_failed");
             throw error;
           }
 
           const planningStarted = traceStart(trace, "planning");
-          const plan = buildTurnPlan({
+          plan = buildTurnPlan({
             decision: routed.decision,
             responseLanguage: routed.responseLanguage,
             catalog,
@@ -198,7 +225,12 @@ export function createVoiceRouterController(options: {
             (error.kind === "unavailable" || error.kind === "transport")
               ? "unavailable"
               : "failed";
-          return failedResult(input, trace, status);
+          return failedResult(input, trace, status, {
+            ...(routed
+              ? { decision: routed.decision, responseLanguage: routed.responseLanguage }
+              : {}),
+            ...(plan ? { plan } : {}),
+          });
         } finally {
           modelSession?.close();
         }

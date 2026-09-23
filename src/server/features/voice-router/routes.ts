@@ -6,7 +6,7 @@ import {
 } from "../../../shared/voice-router.ts";
 import { InputError, readJson } from "../../http/json.ts";
 import type { VoiceRouterController } from "./controller.ts";
-import { SessionConflictError } from "./state.ts";
+import { SessionCapacityError, SessionConflictError } from "./state.ts";
 
 async function bodyFrom(event: Parameters<Parameters<typeof defineEventHandler>[0]>[0]) {
   try {
@@ -19,10 +19,7 @@ async function bodyFrom(event: Parameters<Parameters<typeof defineEventHandler>[
   }
 }
 
-export function registerVoiceRouterRoutes(
-  router: Router,
-  controller: VoiceRouterController,
-): void {
+export function registerVoiceRouterRoutes(router: Router, controller: VoiceRouterController): void {
   router.post(
     "/api/voice-router/turn",
     defineEventHandler(async (event) => {
@@ -35,6 +32,9 @@ export function registerVoiceRouterRoutes(
       } catch (error) {
         if (error instanceof SessionConflictError) {
           throw createError({ statusCode: 409, statusMessage: error.message });
+        }
+        if (error instanceof SessionCapacityError) {
+          throw createError({ statusCode: 503, statusMessage: "Voice router is busy" });
         }
         throw error;
       }

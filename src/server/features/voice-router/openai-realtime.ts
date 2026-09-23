@@ -25,7 +25,11 @@ const functionCallSchema = z.looseObject({
 const messageSchema = z.looseObject({
   type: z.literal("message"),
   content: z.array(
-    z.looseObject({ type: z.string(), text: z.string().optional(), transcript: z.string().optional() }),
+    z.looseObject({
+      type: z.string(),
+      text: z.string().optional(),
+      transcript: z.string().optional(),
+    }),
   ),
 });
 
@@ -51,11 +55,14 @@ async function openSocket(config: OpenAiRealtimeConfig, signal?: AbortSignal) {
   const timeoutMs = config.requestTimeoutMs ?? 15_000;
 
   await new Promise<void>((resolve, reject) => {
-    let opened = false;
-    const timer = setTimeout(() => fail(providerError("transport", "Realtime connection timed out")), timeoutMs);
+    const timer = setTimeout(
+      () => fail(providerError("transport", "Realtime connection timed out")),
+      timeoutMs,
+    );
     const cleanup = () => {
       clearTimeout(timer);
       socket.off("open", onOpen);
+      socket.off("message", onMessage);
       socket.off("error", onError);
       socket.off("close", onClose);
       signal?.removeEventListener("abort", onAbort);
@@ -66,16 +73,33 @@ async function openSocket(config: OpenAiRealtimeConfig, signal?: AbortSignal) {
       reject(error);
     };
     const onOpen = () => {
-      opened = true;
+      // The protocol is ready only after session.created, not merely after the TCP upgrade.
+    };
+    const onMessage = (data: RawData) => {
+      let event: unknown;
+      try {
+        event = parseMessage(data);
+      } catch (error) {
+        fail(error instanceof Error ? error : providerError("protocol", "Invalid startup event"));
+        return;
+      }
+      if (typeof event !== "object" || event === null || !("type" in event)) return;
+      if (event.type === "error") {
+        fail(providerError("protocol", "Realtime session initialization failed"));
+        return;
+      }
+      if (event.type !== "session.created") return;
       cleanup();
       resolve();
     };
-    const onError = (error: Error) => fail(providerError("transport", "Realtime connection failed", error));
-    const onClose = () => {
-      if (!opened) fail(providerError("transport", "Realtime connection closed during startup"));
-    };
-    const onAbort = () => fail(providerError("transport", "Realtime connection was cancelled", signal?.reason));
+    const onError = (error: Error) =>
+      fail(providerError("transport", "Realtime connection failed", error));
+    const onClose = () =>
+      fail(providerError("transport", "Realtime connection closed during startup"));
+    const onAbort = () =>
+      fail(providerError("transport", "Realtime connection was cancelled", signal?.reason));
     socket.once("open", onOpen);
+    socket.on("message", onMessage);
     socket.once("error", onError);
     socket.once("close", onClose);
     if (signal?.aborted) onAbort();
@@ -133,15 +157,20 @@ async function createSession(
         cleanup();
         reject(error);
       };
-      const onError = (error: Error) => fail(providerError("transport", "Realtime transport failed", error));
-      const onClose = () => fail(providerError("transport", "Realtime connection closed before completion"));
-      const onAbort = () => fail(providerError("transport", "Realtime response was cancelled", signal?.reason), true);
+      const onError = (error: Error) =>
+        fail(providerError("transport", "Realtime transport failed", error));
+      const onClose = () =>
+        fail(providerError("transport", "Realtime connection closed before completion"));
+      const onAbort = () =>
+        fail(providerError("transport", "Realtime response was cancelled", signal?.reason), true);
       const onMessage = (data: RawData) => {
         let event: unknown;
         try {
           event = parseMessage(data);
         } catch (error) {
-          fail(error instanceof Error ? error : providerError("protocol", "Invalid Realtime event"));
+          fail(
+            error instanceof Error ? error : providerError("protocol", "Invalid Realtime event"),
+          );
           return;
         }
         if (typeof event !== "object" || event === null || !("type" in event)) return;
@@ -152,7 +181,9 @@ async function createSession(
         const done = responseDoneSchema.safeParse(event);
         if (!done.success || done.data.response.metadata?.request_id !== requestId) return;
         if (done.data.response.status !== "completed") {
-          fail(providerError("protocol", `Realtime response ended with ${done.data.response.status}`));
+          fail(
+            providerError("protocol", `Realtime response ended with ${done.data.response.status}`),
+          );
           return;
         }
         cleanup();
@@ -167,18 +198,22 @@ async function createSession(
         return;
       }
       signal?.addEventListener("abort", onAbort, { once: true });
-      socket.send(
-        JSON.stringify({
-          type: "response.create",
-          response: {
-            conversation: "none",
-            output_modalities: ["text"],
-            metadata,
-            max_output_tokens: 1_200,
-            ...response,
-          },
-        }),
-      );
+      try {
+        socket.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              conversation: "none",
+              output_modalities: ["text"],
+              metadata,
+              max_output_tokens: 1_200,
+              ...response,
+            },
+          }),
+        );
+      } catch (cause) {
+        fail(providerError("transport", "Realtime request could not be sent", cause));
+      }
     });
   }
 

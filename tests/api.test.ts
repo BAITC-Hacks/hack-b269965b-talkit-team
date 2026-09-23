@@ -4,11 +4,36 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import type { VoiceRouterController } from "../src/server/features/voice-router/controller.ts";
 import { createHttpServer } from "../src/server/server.ts";
 import { echoOutputSchema, healthSchema } from "../src/shared/contracts.ts";
+import { turnResultSchema } from "../src/shared/voice-router.ts";
 
-const server = createHttpServer({ appName: "Test", logRequests: false });
+const voiceRouterController: VoiceRouterController = {
+  async handleTurn(input) {
+    return {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      selectedText: input.text,
+      source: input.source,
+      ...(input.stt ? { stt: input.stt } : {}),
+      answer: "fake adapter response",
+      status: "completed",
+      trace: [],
+    };
+  },
+  resetSession() {
+    return true;
+  },
+};
+const server = createHttpServer({
+  appName: "Test",
+  logRequests: false,
+  voiceRouterController,
+});
 let base = "";
+const sessionId = "123e4567-e89b-42d3-a456-426614174200";
+const turnId = "123e4567-e89b-42d3-a456-426614174201";
 
 async function listen(target: Server): Promise<string> {
   await new Promise<void>((resolve, reject) => {
@@ -77,6 +102,41 @@ test("echo accepts optional whitespace before Content-Type parameters", async ()
     body: JSON.stringify({ text: "ok" }),
   });
   assert.equal(response.status, 200);
+});
+
+test("voice router accepts a real text turn contract", async () => {
+  const response = await call("/api/voice-router/turn", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, turnId, text: "  Как оплатить полис?  ", source: "text" }),
+  });
+  assert.equal(response.status, 200);
+  const result = turnResultSchema.parse(await response.json());
+  assert.equal(result.selectedText, "Как оплатить полис?");
+  assert.equal(result.answer, "fake adapter response");
+});
+
+test("voice router validates input and method boundaries", async () => {
+  const invalid = await call("/api/voice-router/turn", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, turnId, text: " ", source: "text" }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const wrongMethod = await call("/api/voice-router/turn");
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get("allow"), "POST");
+});
+
+test("voice router session can be reset explicitly", async () => {
+  const response = await call("/api/voice-router/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { sessionId, reset: true });
 });
 
 test("echo rejects unsupported methods with Allow", async () => {

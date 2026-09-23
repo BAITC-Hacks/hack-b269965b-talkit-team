@@ -3,7 +3,7 @@ defineProps<{ status: string; healthy: boolean }>();
 </script>
 <template>
   <header class="topbar">
-    <a class="brand" href="/">TalkIt <span>/ HackAlem Starter</span></a>
+    <a class="brand" href="/">TalkIt <span>/ Saqta Voice Router</span></a>
     <span class="status" :class="{ healthy }" role="status">{{ status }}</span>
   </header>
 </template>

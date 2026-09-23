@@ -15,10 +15,10 @@ function urgentFirst(ids: readonly string[], catalog: VoiceRouterCatalog): strin
   ];
 }
 
-function outcomeForSystemIntent(ids: readonly string[]): TurnPlan["outcome"] | undefined {
-  if (ids.includes("SYS_GOODBYE")) return "goodbye";
-  if (ids.includes("SYS_OUT_OF_SCOPE")) return "out_of_scope";
-  if (ids.includes("SYS_UNCLEAR")) return "clarify";
+function outcomeForSystemIntent(id: string | undefined): TurnPlan["outcome"] | undefined {
+  if (id === "SYS_GOODBYE") return "goodbye";
+  if (id === "SYS_OUT_OF_SCOPE") return "out_of_scope";
+  if (id === "SYS_UNCLEAR") return "clarify";
   return undefined;
 }
 
@@ -37,7 +37,7 @@ export function buildTurnPlan(input: {
     decision.scenarios.map((item) => [item.scenario_id, item.confidence]),
   );
   const activeConfidence = confidenceById.get(orderedScenarioIds[0] ?? "") ?? 0;
-  const explicitOutcome = outcomeForSystemIntent(orderedScenarioIds);
+  const explicitOutcome = outcomeForSystemIntent(orderedScenarioIds[0]);
   let outcome: TurnPlan["outcome"];
 
   if (explicitOutcome) {
@@ -76,13 +76,15 @@ export function buildTurnPlan(input: {
     (id): id is string => Boolean(id),
   );
   const optionNames = optionIds.map(
-    (id) => catalog.scenarioById.get(id)?.name ?? catalog.systemIntentById.get(id)?.description ?? id,
+    (id) =>
+      catalog.scenarioById.get(id)?.name ?? catalog.systemIntentById.get(id)?.description ?? id,
   );
   const unclearResponse = catalog.systemIntentById
     .get("SYS_UNCLEAR")
     ?.response[responseLanguage].replace("{option_a}", optionNames[0] ?? "первый вариант")
     .replace("{option_b}", optionNames[1] ?? "другой вопрос");
-  const nextQuestion = outcome === "clarify" ? unclearResponse : slotQuestion;
+  const nextQuestion =
+    outcome === "clarify" ? unclearResponse : outcome === "respond" ? slotQuestion : undefined;
   const knowledgeRefs = getKnowledgeFacts(orderedScenarioIds, catalog).map((fact) => fact.ref);
 
   state.activeScenarioIds = orderedScenarioIds;

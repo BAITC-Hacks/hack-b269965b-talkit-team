@@ -12,6 +12,28 @@ export async function smoke(base, checkWeb = false) {
   });
   assert.equal(echo.status, 200);
   assert.equal((await echo.json()).text, "Сәлем, HackAlem!");
+  if (checkWeb) {
+    const sessionId = "123e4567-e89b-42d3-a456-426614174300";
+    const turn = await call("/api/voice-router/turn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        turnId: "123e4567-e89b-42d3-a456-426614174301",
+        text: "Как оплатить полис?",
+        source: "text",
+      }),
+    });
+    assert.equal(turn.status, 200);
+    assert.equal((await turn.json()).status, "unavailable");
+    const reset = await call("/api/voice-router/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+    assert.equal(reset.status, 200);
+    assert.equal((await reset.json()).reset, true);
+  }
   const missing = await call("/api/no-such-route");
   assert.equal(missing.status, 404);
   assert.match(missing.headers.get("content-type") ?? "", /application\/json/);
@@ -58,5 +80,7 @@ export async function smoke(base, checkWeb = false) {
       }
     }
   }
-  console.log(`Smoke passed: health, echo, API 404${checkWeb ? ", built SPA and assets" : ""}`);
+  console.log(
+    `Smoke passed: health, echo, API 404${checkWeb ? ", voice-router unavailable path, reset, built SPA and assets" : ""}`,
+  );
 }

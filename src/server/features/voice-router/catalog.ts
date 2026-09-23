@@ -25,9 +25,7 @@ const scenarioSchema = z
     priority: z.enum(["normal", "high", "urgent"]),
     fast_path_eligible: z.boolean(),
     requires_identification: z.boolean(),
-    slots: z
-      .object({ required: z.array(z.string()), optional: z.array(z.string()) })
-      .strict(),
+    slots: z.object({ required: z.array(z.string()), optional: z.array(z.string()) }).strict(),
     actions: z.array(z.string()),
     requires_confirmation: z.boolean(),
     handoff: z
@@ -65,7 +63,9 @@ const slotBase = {
   prompt: localizedPromptSchema,
 };
 const slotSchema = z.discriminatedUnion("type", [
-  z.object({ ...slotBase, type: z.literal("string"), pattern: z.string().min(1).optional() }).strict(),
+  z
+    .object({ ...slotBase, type: z.literal("string"), pattern: z.string().min(1).optional() })
+    .strict(),
   z.object({ ...slotBase, type: z.literal("text") }).strict(),
   z
     .object({
@@ -77,7 +77,9 @@ const slotSchema = z.discriminatedUnion("type", [
   z.object({ ...slotBase, type: z.literal("integer") }).strict(),
   z.object({ ...slotBase, type: z.literal("date") }).strict(),
   z.object({ ...slotBase, type: z.literal("boolean") }).strict(),
-  z.object({ ...slotBase, type: z.literal("list"), pattern: z.string().min(1).optional() }).strict(),
+  z
+    .object({ ...slotBase, type: z.literal("list"), pattern: z.string().min(1).optional() })
+    .strict(),
 ]);
 const slotsSchema = z.object({ meta: metaSchema, slots: z.array(slotSchema) }).strict();
 const actionSchema = z
@@ -183,9 +185,11 @@ function buildRoutingPrompt(
         `priority=${scenario.priority}`,
         scenario.description,
         `slots=${[...scenario.slots.required, ...scenario.slots.optional].join(",") || "none"}`,
-        `not_this_if=${scenario.not_this_if
-          .map((edge) => `${edge.condition}=>${edge.use_instead}`)
-          .join(" | ") || "none"}`,
+        `not_this_if=${
+          scenario.not_this_if
+            .map((edge) => `${edge.condition}=>${edge.use_instead}`)
+            .join(" | ") || "none"
+        }`,
         `examples_ru=${scenario.examples.ru.slice(0, 2).join(" | ")}`,
         `examples_kk=${scenario.examples.kk.slice(0, 2).join(" | ")}`,
       ].join(" :: "),
@@ -259,20 +263,30 @@ export function createVoiceRouterCatalog(sources: CatalogSources) {
     ],
     "scenario ID",
   );
-  const slotNames = unique(slots.slots.map((item) => item.name), "slot name");
-  const actionNames = unique(actions.actions.map((item) => item.name), "action name");
+  const slotNames = unique(
+    slots.slots.map((item) => item.name),
+    "slot name",
+  );
+  const actionNames = unique(
+    actions.actions.map((item) => item.name),
+    "action name",
+  );
   const queues = unique(actions.queues, "queue name");
   const scenarioById = new Map(source.scenarios.map((item) => [item.scenario_id, item]));
   const systemIntentById = new Map(source.system_intents.map((item) => [item.id, item]));
   const slotByName = new Map(slots.slots.map((item) => [item.name, item]));
 
   for (const scenario of source.scenarios) {
-    unique([...scenario.slots.required, ...scenario.slots.optional], `${scenario.scenario_id} slot`);
+    unique(
+      [...scenario.slots.required, ...scenario.slots.optional],
+      `${scenario.scenario_id} slot`,
+    );
     for (const name of [...scenario.slots.required, ...scenario.slots.optional]) {
       if (!slotNames.has(name)) throw new Error(`${scenario.scenario_id}: unknown slot ${name}`);
     }
     for (const name of scenario.actions) {
-      if (!actionNames.has(name)) throw new Error(`${scenario.scenario_id}: unknown action ${name}`);
+      if (!actionNames.has(name))
+        throw new Error(`${scenario.scenario_id}: unknown action ${name}`);
     }
     for (const edge of scenario.not_this_if) {
       if (!ids.has(edge.use_instead)) {
@@ -286,7 +300,8 @@ export function createVoiceRouterCatalog(sources: CatalogSources) {
 
   const knowledgeFactsByScenario = new Map<string, KnowledgeFact[]>();
   for (const [scenarioId, paths] of Object.entries(bindings.bindings)) {
-    if (!scenarioById.has(scenarioId)) throw new Error(`Knowledge binding has unknown scenario: ${scenarioId}`);
+    if (!scenarioById.has(scenarioId))
+      throw new Error(`Knowledge binding has unknown scenario: ${scenarioId}`);
     const facts = paths.map((ref) => ({ ref, value: valueAtPath(knowledgeBase, ref) }));
     if (JSON.stringify(facts).length > 20_000) {
       throw new Error(`${scenarioId}: knowledge context exceeds 20000 characters`);
@@ -369,7 +384,8 @@ export function parseCatalogRouteDecision(
   for (const [name, slotValue] of Object.entries(decision.slots)) {
     const slot = catalog.slotByName.get(name);
     if (!slot) throw new Error(`Unknown slot: ${name}`);
-    if (!allowedSlots.has(name)) throw new Error(`Slot ${name} is not valid for selected scenarios`);
+    if (!allowedSlots.has(name))
+      throw new Error(`Slot ${name} is not valid for selected scenarios`);
     if (!validateSlotValue(slot, slotValue)) throw new Error(`Invalid value for slot: ${name}`);
   }
   return decision;
