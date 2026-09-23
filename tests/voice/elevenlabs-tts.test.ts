@@ -112,3 +112,28 @@ test("ElevenLabs TTS aborts one request and rejects a truncated PCM frame", asyn
     (error: unknown) => error instanceof ElevenLabsTtsError && error.kind === "protocol",
   );
 });
+
+test("ElevenLabs TTS classifies a broken audio stream without leaking its cause", async () => {
+  const broken = createElevenLabsTts({
+    apiKey: "test-key",
+    voiceId: "voice",
+    model: "eleven_v3",
+    fetchImpl: (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error("private provider detail"));
+          },
+        }),
+        { headers: { "content-type": "audio/pcm" } },
+      )) as typeof fetch,
+  });
+
+  await assert.rejects(
+    broken.stream({ text: "hello", onAudioChunk() {} }),
+    (error: unknown) =>
+      error instanceof ElevenLabsTtsError &&
+      error.kind === "transport" &&
+      !error.message.includes("private provider detail"),
+  );
+});

@@ -324,9 +324,10 @@ export class RealtimeVoiceClient {
     }
   }
 
-  stopTurn(): Promise<void> {
-    if (this.#pendingStop && this.#pendingStop.turnId === this.#snapshot.activeTurnId) {
-      return this.#pendingStop.promise;
+  async stopTurn(): Promise<void> {
+    const pendingStop = this.#pendingStop;
+    if (pendingStop && pendingStop.turnId === this.#snapshot.activeTurnId) {
+      return pendingStop.promise;
     }
     this.#assertState("recording");
     const socket = this.#requireSocket();
@@ -351,6 +352,7 @@ export class RealtimeVoiceClient {
           }),
         );
       } catch (cause) {
+        if (this.#snapshot.activeTurnId !== turnId) return;
         await this.#fail(cause);
         throw safeRealtimeError(cause);
       }
