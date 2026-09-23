@@ -21,6 +21,7 @@ export interface RealtimeSocketOptions {
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
   maxFrameBytes?: number;
+  maxIncomingFrameBytes?: number;
   maxBufferedAmount?: number;
   maxQueuedBytes?: number;
   maxJsonMessageBytes?: number;
@@ -52,6 +53,8 @@ export class RealtimeSocket {
       connectTimeoutMs: options.connectTimeoutMs ?? 8000,
       handshakeTimeoutMs: options.handshakeTimeoutMs ?? 8000,
       maxFrameBytes: options.maxFrameBytes ?? 65_536,
+      // Incoming TTS chunks include a UUID prefix and can exceed a microphone frame.
+      maxIncomingFrameBytes: options.maxIncomingFrameBytes ?? 65_536 + 36,
       maxBufferedAmount: options.maxBufferedAmount ?? 256 * 1024,
       maxQueuedBytes: options.maxQueuedBytes ?? 2 * 1024 * 1024,
       maxJsonMessageBytes: options.maxJsonMessageBytes ?? 256 * 1024,
@@ -269,9 +272,19 @@ export class RealtimeSocket {
     if (generation !== this.#generation) return;
     if (typeof event.data !== "string") {
       let data: ArrayBuffer;
-      if (event.data instanceof ArrayBuffer) data = event.data;
-      else if (event.data instanceof Blob) data = await event.data.arrayBuffer();
-      else {
+      if (event.data instanceof ArrayBuffer) {
+        if (event.data.byteLength > this.#options.maxIncomingFrameBytes) {
+          this.#protocolFailure("Backend binary frame exceeds the receive limit");
+          return;
+        }
+        data = event.data;
+      } else if (event.data instanceof Blob) {
+        if (event.data.size > this.#options.maxIncomingFrameBytes) {
+          this.#protocolFailure("Backend binary frame exceeds the receive limit");
+          return;
+        }
+        data = await event.data.arrayBuffer();
+      } else {
         this.#protocolFailure("Unsupported binary WebSocket payload");
         return;
       }

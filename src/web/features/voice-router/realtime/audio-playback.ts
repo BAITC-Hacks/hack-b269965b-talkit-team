@@ -4,8 +4,10 @@ import type { PcmAudioFormat } from "./protocol.ts";
 export interface PcmPlaybackOptions {
   format: PcmAudioFormat;
   maxQueuedSeconds?: number;
+  startConfirmationTimeoutMs?: number;
   onStarted?: () => void;
   onIdle?: () => void;
+  onError?: (error: RealtimeClientError) => void;
   audioContextFactory?: () => AudioContext;
 }
 
@@ -24,8 +26,10 @@ export class PcmPlaybackQueue {
     this.#options = {
       format: options.format,
       maxQueuedSeconds: options.maxQueuedSeconds ?? 10,
+      startConfirmationTimeoutMs: options.startConfirmationTimeoutMs ?? 5000,
       onStarted: options.onStarted ?? (() => undefined),
       onIdle: options.onIdle ?? (() => undefined),
+      onError: options.onError ?? (() => undefined),
       audioContextFactory: options.audioContextFactory ?? (() => new AudioContext()),
     };
   }
@@ -37,7 +41,12 @@ export class PcmPlaybackQueue {
 
   async prime(): Promise<void> {
     const context = this.#context ?? (this.#context = this.#options.audioContextFactory());
-    if (context.state === "suspended") await context.resume();
+    if (context.state !== "running" && context.state !== "closed") await context.resume();
+    if (context.state !== "running") {
+      throw new RealtimeClientError("PLAYBACK_FAILED", "Browser did not unlock audio playback", {
+        recoverable: true,
+      });
+    }
   }
 
   async enqueue(data: ArrayBuffer): Promise<void> {
@@ -85,7 +94,13 @@ export class PcmPlaybackQueue {
       }
     };
     source.start(startAt);
-    if (!this.#started && !this.#startTimers.size) this.#pollStart(source, startAt);
+    if (!this.#started && !this.#startTimers.size) {
+      this.#pollStart(
+        source,
+        startAt,
+        performance.now() + this.#options.startConfirmationTimeoutMs,
+      );
+    }
   }
 
   #markStarted(): void {
@@ -96,7 +111,7 @@ export class PcmPlaybackQueue {
     this.#options.onStarted();
   }
 
-  #pollStart(source: AudioBufferSourceNode, startAt: number): void {
+  #pollStart(source: AudioBufferSourceNode, startAt: number, deadline: number): void {
     const context = this.#context;
     if (this.#cancelled || !context || !this.#sources.has(source)) return;
     const outputTime = context.getOutputTimestamp?.().contextTime;
@@ -108,9 +123,18 @@ export class PcmPlaybackQueue {
       this.#markStarted();
       return;
     }
+    if (performance.now() >= deadline) {
+      void this.cancel().catch(() => undefined);
+      this.#options.onError(
+        new RealtimeClientError("PLAYBACK_FAILED", "Audio playback did not start", {
+          recoverable: true,
+        }),
+      );
+      return;
+    }
     const timer = window.setTimeout(() => {
       this.#startTimers.delete(timer);
-      this.#pollStart(source, startAt);
+      this.#pollStart(source, startAt, deadline);
     }, 15);
     this.#startTimers.add(timer);
   }

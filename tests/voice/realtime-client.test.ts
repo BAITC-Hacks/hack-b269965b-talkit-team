@@ -2,7 +2,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RealtimeVoiceClient } from "../../src/web/features/voice-router/realtime/client.ts";
-import { PcmMicrophoneCapture } from "../../src/web/features/voice-router/realtime/audio-capture.ts";
+import {
+  PcmMicrophoneCapture,
+  StreamingPcm16Encoder,
+} from "../../src/web/features/voice-router/realtime/audio-capture.ts";
 import { PcmPlaybackQueue } from "../../src/web/features/voice-router/realtime/audio-playback.ts";
 import { DEFAULT_AUDIO_FORMAT } from "../../src/shared/voice.ts";
 import type {
@@ -77,8 +80,8 @@ class FakeSocket extends EventTarget {
     this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(message) }));
   }
 
-  emitAudio(playbackId: string): void {
-    const data = new Uint8Array(36 + 640);
+  emitAudio(playbackId: string, pcmBytes = 640): void {
+    const data = new Uint8Array(36 + pcmBytes);
     data.set(new TextEncoder().encode(playbackId));
     this.dispatchEvent(new MessageEvent("message", { data: data.buffer }));
   }
@@ -185,10 +188,10 @@ test("realtime client retains one capture, exposes STT/DSR and acknowledges only
       payload: { audioFormat: DEFAULT_AUDIO_FORMAT, playbackId },
     });
     socket.emitAudio(crypto.randomUUID());
-    socket.emitAudio(playbackId);
+    socket.emitAudio(playbackId, 8000);
     await tick();
     assert.equal(playbacks[0]?.chunks.length, 1);
-    assert.equal(playbacks[0]?.chunks[0]?.byteLength, 640);
+    assert.equal(playbacks[0]?.chunks[0]?.byteLength, 8000);
     assert.equal(client.getSnapshot().sttHypotheses[0]?.payload.text, "Здравствуйте");
     assert.equal(client.getSnapshot().dsrResolution?.payload.status, "accepted");
     assert.equal(client.getSnapshot().playbackId, playbackId);
@@ -198,10 +201,16 @@ test("realtime client retains one capture, exposes STT/DSR and acknowledges only
     socket.emit("turn.completed", {
       sessionId,
       turnId,
-      payload: { result: { status: "completed" } },
+      payload: { result: { status: "completed", detail: { reason: "test" } } },
     });
     assert.equal(client.getSnapshot().activeTurnId, turnId);
     assert.equal(client.getSnapshot().lastResponseDelivery?.status, "playing");
+    const result = client.getSnapshot().lastTurnResult;
+    assert.ok(Object.isFrozen(result));
+    assert.ok(Object.isFrozen(result?.detail));
+    assert.throws(() => {
+      (result?.detail as { reason: string }).reason = "changed";
+    }, TypeError);
     playbacks[0]!.finish();
     await tick();
     assert.ok(socket.sentTypes().includes("response.audio.completed"));
@@ -471,6 +480,122 @@ test("capture pauses between turns without requesting another microphone stream"
     });
   }
   assert.equal(stops, 1);
+});
+
+for (const kind of ["arraybuffer", "blob"] as const) {
+  test(`client rejects oversized incoming ${kind} before passing it to playback`, async () => {
+    const socket = new FakeSocket();
+    const client = new RealtimeVoiceClient({
+      url: "ws://localhost/api/voice-router/ws",
+      socketOptions: { maxIncomingFrameBytes: 676 },
+      socketFactory: () => {
+        socket.open();
+        return socket as unknown as WebSocket;
+      },
+    });
+    try {
+      await client.connect();
+      const bytes = new ArrayBuffer(678);
+      socket.dispatchEvent(
+        new MessageEvent("message", {
+          data: kind === "blob" ? new Blob([bytes]) : bytes,
+        }),
+      );
+      await tick();
+      assert.equal(client.getSnapshot().state, "error");
+      assert.match(client.getSnapshot().lastError?.message ?? "", /receive limit/);
+      assert.equal(socket.readyState, 3);
+    } finally {
+      await client.destroy();
+    }
+  });
+}
+
+test("PCM encoding keeps little-endian bytes and resampling phase across chunks", () => {
+  const frames: ArrayBuffer[] = [];
+  const encoder = new StreamingPcm16Encoder(
+    8000,
+    { encoding: "pcm_s16le", sampleRate: 8000, channels: 1, frameSamples: 80 },
+    (frame) => frames.push(frame),
+  );
+  const samples = new Float32Array(81);
+  samples[0] = -1;
+  samples[1] = 1;
+  encoder.push(samples);
+  assert.deepEqual([...new Uint8Array(frames[0]!).slice(0, 4)], [0x00, 0x80, 0xff, 0x7f]);
+  assert.deepEqual(encoder.finish(), { emittedFrames: 1, emittedBytes: 160, droppedSamples: 1 });
+
+  const input = Float32Array.from({ length: 960 }, (_, index) => Math.sin(index / 17));
+  const encode = (chunks: Float32Array[]) => {
+    const bytes: number[] = [];
+    const resampler = new StreamingPcm16Encoder(
+      48_000,
+      { encoding: "pcm_s16le", sampleRate: 16_000, channels: 1, frameSamples: 80 },
+      (frame) => bytes.push(...new Uint8Array(frame)),
+    );
+    for (const chunk of chunks) resampler.push(chunk);
+    return { bytes, stats: resampler.finish() };
+  };
+  assert.deepEqual(
+    encode([input.slice(0, 127), input.slice(127, 513), input.slice(513)]),
+    encode([input]),
+  );
+});
+
+test("playback start timeout stops sources and reports a recoverable error", async () => {
+  let stops = 0;
+  let started = 0;
+  let resolveFailure!: (error: Error) => void;
+  let rejectFailure!: (error: Error) => void;
+  const failure = new Promise<Error>((resolve, reject) => {
+    resolveFailure = resolve;
+    rejectFailure = reject;
+  });
+  const fakeContext = {
+    state: "running",
+    currentTime: 0,
+    destination: {},
+    createBuffer: (_channels: number, length: number) => ({
+      getChannelData: () => new Float32Array(length),
+    }),
+    createBufferSource: () => ({
+      buffer: null,
+      onended: null,
+      connect() {},
+      disconnect() {},
+      start() {},
+      stop() {
+        stops += 1;
+      },
+    }),
+    close: async () => {
+      fakeContext.state = "closed";
+    },
+  };
+  const playback = new PcmPlaybackQueue({
+    format: DEFAULT_AUDIO_FORMAT,
+    audioContextFactory: () => fakeContext as unknown as AudioContext,
+    startConfirmationTimeoutMs: 20,
+    onStarted: () => {
+      started += 1;
+    },
+    onError: resolveFailure,
+  });
+  const timeout = setTimeout(
+    () => rejectFailure(new Error("Playback timeout was not reported")),
+    1500,
+  );
+  try {
+    await playback.enqueue(new ArrayBuffer(640));
+    const error = await failure;
+    assert.match(error.message, /did not start/);
+    assert.equal(started, 0);
+    assert.equal(stops, 1);
+    assert.equal(fakeContext.state, "closed");
+  } finally {
+    clearTimeout(timeout);
+    await playback.cancel();
+  }
 });
 
 test("playback start waits for the audio output clock", async () => {

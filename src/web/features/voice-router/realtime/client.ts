@@ -128,6 +128,12 @@ function sameFormat(left: PcmAudioFormat, right: PcmAudioFormat): boolean {
   );
 }
 
+function deepFreeze<T>(value: T): Readonly<T> {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value);
+}
+
 export class RealtimeVoiceClient {
   readonly #options: RealtimeVoiceClientOptions;
   readonly #listeners = new Set<(snapshot: RealtimeVoiceSnapshot) => void>();
@@ -180,6 +186,9 @@ export class RealtimeVoiceClient {
   getSnapshot(): Readonly<RealtimeVoiceSnapshot> {
     return Object.freeze({
       ...this.#snapshot,
+      lastError: this.#snapshot.lastError
+        ? Object.freeze({ ...this.#snapshot.lastError })
+        : undefined,
       sttHypotheses: Object.freeze([...this.#snapshot.sttHypotheses]),
       lastCompletedSttHypotheses: Object.freeze([...this.#snapshot.lastCompletedSttHypotheses]),
     });
@@ -316,7 +325,7 @@ export class RealtimeVoiceClient {
   }
 
   stopTurn(): Promise<void> {
-    if (this.#pendingStop?.turnId === this.#snapshot.activeTurnId) {
+    if (this.#pendingStop && this.#pendingStop.turnId === this.#snapshot.activeTurnId) {
       return this.#pendingStop.promise;
     }
     this.#assertState("recording");
@@ -552,6 +561,9 @@ export class RealtimeVoiceClient {
           this.#setSnapshot({ queuedPlaybackSeconds: 0 });
           this.#maybeCompletePlayback(playbackWindow);
         },
+        onError: (error) => {
+          if (this.#playbackWindow === playbackWindow) void this.#fail(error);
+        },
       });
       return;
     }
@@ -581,7 +593,7 @@ export class RealtimeVoiceClient {
         }
       }
       this.#setSnapshot({
-        lastTurnResult: Object.freeze({ ...message.payload.result }),
+        lastTurnResult: deepFreeze(structuredClone(message.payload.result)),
         lastCompletedSttHypotheses: this.#snapshot.sttHypotheses.filter(
           (hypothesis) => hypothesis.turnId === message.turnId,
         ),

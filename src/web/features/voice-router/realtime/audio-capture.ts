@@ -48,7 +48,7 @@ export class StreamingPcm16Encoder {
       this.#position += step;
       this.#emitCompleteFrames();
     }
-    const consumed = Math.floor(this.#position);
+    const consumed = Math.min(Math.floor(this.#position), this.#source.length);
     if (consumed > 0) {
       this.#source = this.#source.slice(consumed);
       this.#position -= consumed;
