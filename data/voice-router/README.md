@@ -1,5 +1,33 @@
 # Voice Router — Dataset
 
+## Integration in this repository
+
+This is the source kit for the HackAlem AI Voice Router case owned by Halyk Bank. Saqta is fictional; the simulation date is `2026-10-01`. The original dataset documentation follows this integration note. JSON data, expected labels and `evaluate.py` remain unchanged.
+
+The application loads the 40 scenarios, 3 system intents, slots/actions and knowledge. An LLM chooses the route; server policy validates it; OpenAI/Yandex provide STT and ElevenLabs provides speech output. The mock backend is data, not a running service: an action executor and actual operator handoff are not implemented. Example expectation: a payment charged without an issued policy maps to SC30, not a fabricated refund.
+
+Run from the repository root with Node 24.21+ (24.x) and pnpm 10.28.0:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm dev
+pnpm run check
+```
+
+The UI is at `http://127.0.0.1:5173`. No `.env` or keys are required to open it or run local tests, but routing returns `unavailable` without OpenAI; unconfigured speech does not become a successful voice demo. See the [project README](../../README.md) for every environment variable, API contract, production deployment and the special local `doctor` requirement for `.env`.
+
+TTS needs both `ELEVENLABS_API_KEY` and an **existing `ELEVENLABS_VOICE_ID` already added/uploaded to that key's account and accessible to the key**. An arbitrary voice name or model ID will not work.
+
+`pnpm run eval:router` makes paid OpenAI requests for the 104 dev utterances and overwrites predictions under `artifacts/router-eval/`. Run only with approved API usage. Scoring an existing prediction file is offline:
+
+```sh
+python data/voice-router/evaluate.py artifacts/router-eval/predictions.json data/voice-router/dev_utterances.json
+```
+
+Primary accuracy compares the first ID; full match compares sets; intent recall covers multi-intent examples. Neither this evaluator nor mocked local tests prove microphone/TTS quality, dialogue continuity or the 500 ms / 1.5 s latency targets. The 10 sample dialogues require separate checks. Current evidence: [STATUS](../../docs/STATUS.md). Do not change labels to improve scores.
+
+## Original dataset documentation
+
 Case 2 dataset: a voice AI agent for the contact center of **Saqta Insurance**. The agent picks the right scenario with an LLM layer (no intent classifier) and talks like a good human operator, in Kazakh and Russian.
 
 All data is synthetic. Saqta Insurance, its products, prices, rules, clients, addresses and clinics are fictional and simplified. They do not reflect real legislation.
