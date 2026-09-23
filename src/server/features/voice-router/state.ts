@@ -1,4 +1,5 @@
 import type { TurnInput, TurnResult } from "../../../shared/voice-router.ts";
+import type { VoiceRouterModelSession } from "./model.ts";
 import type { RouterSessionState } from "./policy.ts";
 
 interface TurnRecord {
@@ -6,7 +7,12 @@ interface TurnRecord {
   result: Promise<TurnResult>;
 }
 
-interface SessionRecord {
+export interface RouterTurnRuntime {
+  modelSession: VoiceRouterModelSession | undefined;
+  modelSessionOpenedAt: number | undefined;
+}
+
+interface SessionRecord extends RouterTurnRuntime {
   state: RouterSessionState;
   turns: Map<string, TurnRecord>;
   tail: Promise<void>;
@@ -31,21 +37,41 @@ export class SessionCapacityError extends Error {
 
 export class VoiceRouterSessionStore {
   readonly #sessions = new Map<string, SessionRecord>();
-  readonly #options: { maxSessions: number; maxTurnsPerSession: number; ttlMs: number };
+  readonly #options: {
+    maxSessions: number;
+    maxTurnsPerSession: number;
+    ttlMs: number;
+    connectionIdleMs?: number;
+  };
 
   constructor(
-    options: { maxSessions: number; maxTurnsPerSession: number; ttlMs: number } = {
+    options: {
+      maxSessions: number;
+      maxTurnsPerSession: number;
+      ttlMs: number;
+      connectionIdleMs?: number;
+    } = {
       maxSessions: 500,
       maxTurnsPerSession: 20,
       ttlMs: 30 * 60_000,
+      connectionIdleMs: 2 * 60_000,
     },
   ) {
     this.#options = options;
+    setInterval(
+      () => this.#evictExpired(),
+      Math.max(1, Math.min(options.ttlMs, options.connectionIdleMs ?? 2 * 60_000, 60_000)),
+    ).unref();
   }
 
   runTurn(
     input: TurnInput,
-    task: (state: RouterSessionState, signal: AbortSignal) => Promise<TurnResult>,
+    task: (
+      state: RouterSessionState,
+      signal: AbortSignal,
+      runtime: RouterTurnRuntime,
+    ) => Promise<TurnResult>,
+    turnSignal?: AbortSignal,
   ): Promise<TurnResult> {
     this.#evictExpired();
     const fingerprint = JSON.stringify(input);
@@ -54,6 +80,8 @@ export class VoiceRouterSessionStore {
       this.#evictOldestIfFull();
       record = {
         state: { lowConfidenceStreak: 0, activeScenarioIds: [], slots: {} },
+        modelSession: undefined,
+        modelSessionOpenedAt: undefined,
         turns: new Map(),
         tail: Promise.resolve(),
         controller: new AbortController(),
@@ -76,7 +104,11 @@ export class VoiceRouterSessionStore {
       .catch(() => undefined)
       .then(async () => {
         try {
-          return await task(current.state, current.controller.signal);
+          const signal = turnSignal
+            ? AbortSignal.any([current.controller.signal, turnSignal])
+            : current.controller.signal;
+          signal.throwIfAborted();
+          return await task(current.state, signal, current);
         } finally {
           current.pending -= 1;
           current.touchedAt = Date.now();
@@ -98,14 +130,33 @@ export class VoiceRouterSessionStore {
   reset(sessionId: string): boolean {
     const record = this.#sessions.get(sessionId);
     if (!record) return false;
-    record.controller.abort(new Error("Session reset"));
+    this.#dispose(record, "Session reset");
     return this.#sessions.delete(sessionId);
   }
 
+  #closeConnection(record: SessionRecord) {
+    record.modelSession?.close();
+    record.modelSession = undefined;
+    record.modelSessionOpenedAt = undefined;
+  }
+
+  #dispose(record: SessionRecord, reason: string) {
+    record.controller.abort(new Error(reason));
+    this.#closeConnection(record);
+  }
+
   #evictExpired() {
-    const cutoff = Date.now() - this.#options.ttlMs;
+    const now = Date.now();
+    const cutoff = now - this.#options.ttlMs;
+    const connectionCutoff = now - (this.#options.connectionIdleMs ?? 2 * 60_000);
     for (const [sessionId, record] of this.#sessions) {
-      if (record.touchedAt < cutoff && record.pending === 0) this.#sessions.delete(sessionId);
+      if (record.pending !== 0) continue;
+      if (record.touchedAt < cutoff) {
+        this.#dispose(record, "Session expired");
+        this.#sessions.delete(sessionId);
+      } else if (record.touchedAt < connectionCutoff) {
+        this.#closeConnection(record);
+      }
     }
   }
 
@@ -113,7 +164,7 @@ export class VoiceRouterSessionStore {
     if (this.#sessions.size < this.#options.maxSessions) return;
     const inactive = [...this.#sessions].find(([, record]) => record.pending === 0);
     if (!inactive) throw new SessionCapacityError();
-    inactive[1].controller.abort(new Error("Session evicted"));
+    this.#dispose(inactive[1], "Session evicted");
     this.#sessions.delete(inactive[0]);
   }
 }

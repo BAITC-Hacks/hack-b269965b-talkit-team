@@ -2,7 +2,6 @@ export { PcmMicrophoneCapture, type PcmCaptureOptions } from "./audio-capture.ts
 export { PcmPlaybackQueue, type PcmPlaybackOptions } from "./audio-playback.ts";
 export {
   RealtimeVoiceClient,
-  canTransitionRealtimeVoiceState,
   type RealtimeVoiceClientOptions,
   type RealtimeVoiceSnapshot,
   type RealtimeVoiceState,
@@ -12,11 +11,9 @@ export {
   DEFAULT_AUDIO_FORMAT,
   PROTOCOL_VERSION,
   pcmAudioFormatSchema,
-  publicTurnResultSchema,
   serverMessageSchema,
   type ClientMessage,
   type PcmAudioFormat,
-  type PublicTurnResult,
   type ServerMessage,
 } from "./protocol.ts";
 export {

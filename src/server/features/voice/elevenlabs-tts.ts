@@ -1,5 +1,6 @@
 const PCM_SAMPLE_RATE_HZ = 16_000;
 const PCM_BYTES_PER_SAMPLE = 2;
+const FIRST_CHUNK_BYTES = 1_600;
 const EMIT_CHUNK_BYTES = 8_000;
 
 export interface ElevenLabsTtsConfig {
@@ -101,13 +102,14 @@ export function createElevenLabsTts(config: ElevenLabsTtsConfig) {
           let offset = 0;
           while (offset < value.byteLength) {
             input.signal?.throwIfAborted();
-            const take = Math.min(EMIT_CHUNK_BYTES - pendingBytes, value.byteLength - offset);
+            const targetBytes = emittedBytes === 0 ? FIRST_CHUNK_BYTES : EMIT_CHUNK_BYTES;
+            const take = Math.min(targetBytes - pendingBytes, value.byteLength - offset);
             pending.set(value.subarray(offset, offset + take), pendingBytes);
             pendingBytes += take;
             offset += take;
 
-            if (pendingBytes === EMIT_CHUNK_BYTES) {
-              await input.onAudioChunk(pending);
+            if (pendingBytes === targetBytes) {
+              await input.onAudioChunk(pending.subarray(0, pendingBytes));
               emittedBytes += pendingBytes;
               pending = Buffer.allocUnsafe(EMIT_CHUNK_BYTES);
               pendingBytes = 0;

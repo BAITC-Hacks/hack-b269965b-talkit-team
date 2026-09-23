@@ -16,7 +16,7 @@ import { routeTurn } from "./router.ts";
 import { VoiceRouterSessionStore } from "./state.ts";
 
 export interface VoiceRouterController {
-  handleTurn(input: TurnInput): Promise<TurnResult>;
+  handleTurn(input: TurnInput, signal?: AbortSignal): Promise<TurnResult>;
   resetSession(sessionId: string): boolean;
 }
 
@@ -133,108 +133,207 @@ export function createVoiceRouterController(
   const sessions = options.sessions ?? new VoiceRouterSessionStore();
 
   return {
-    handleTurn(rawInput) {
+    handleTurn(rawInput, turnSignal) {
       const input = turnInputSchema.parse(rawInput);
-      return sessions.runTurn(input, async (state, signal) => {
-        const trace: TraceEvent[] = [];
-        const provider = options.provider;
-        if (!provider) {
-          const started = traceStart(trace, "provider");
-          traceEnd(trace, "provider", started, "failed", "provider_not_configured");
-          return failedResult(input, trace, "unavailable");
-        }
-
-        let modelSession: Awaited<ReturnType<VoiceRouterModelProvider["openSession"]>> | undefined;
-        let routed: Awaited<ReturnType<typeof routeTurn>> | undefined;
-        let plan: TurnPlan | undefined;
-        try {
-          const connectionStarted = traceStart(trace, "provider");
-          try {
-            modelSession = await provider.openSession(signal);
-            traceEnd(trace, "provider", connectionStarted, "completed", provider.model);
-          } catch (error) {
-            traceEnd(trace, "provider", connectionStarted, "failed", "provider_connection_failed");
-            throw error;
+      return sessions.runTurn(
+        input,
+        async (state, signal, runtime) => {
+          const trace: TraceEvent[] = [];
+          const provider = options.provider;
+          if (!provider) {
+            const started = traceStart(trace, "provider");
+            traceEnd(trace, "provider", started, "failed", "provider_not_configured");
+            return failedResult(input, trace, "unavailable");
           }
 
-          const routingStarted = traceStart(trace, "routing");
+          let modelSession:
+            | Awaited<ReturnType<VoiceRouterModelProvider["openSession"]>>
+            | undefined;
+          let routed: Awaited<ReturnType<typeof routeTurn>> | undefined;
+          let plan: TurnPlan | undefined;
+          let completed = false;
           try {
-            routed = await routeTurn({
-              text: input.text,
-              context: {
-                activeScenarioIds: state.activeScenarioIds,
-                slots: state.slots,
-                ...(state.responseLanguage ? { responseLanguage: state.responseLanguage } : {}),
-              },
+            const connectionStarted = traceStart(trace, "provider");
+            try {
+              if (
+                runtime.modelSession &&
+                (runtime.modelSession.isOpen?.() === false ||
+                  Date.now() - (runtime.modelSessionOpenedAt ?? 0) >= 55 * 60_000)
+              ) {
+                runtime.modelSession.close();
+                runtime.modelSession = undefined;
+              }
+              const reused = runtime.modelSession !== undefined;
+              if (reused) {
+                modelSession = runtime.modelSession;
+              } else {
+                modelSession = await provider.openSession(signal);
+                if (signal.aborted) {
+                  modelSession.close();
+                  throw new ModelProviderError("transport", "Router session was cancelled");
+                }
+                runtime.modelSession = modelSession;
+                runtime.modelSessionOpenedAt = Date.now();
+              }
+              traceEnd(
+                trace,
+                "provider",
+                connectionStarted,
+                "completed",
+                `${provider.model}; connection=${reused ? "reused" : "new"}`,
+              );
+            } catch (error) {
+              traceEnd(
+                trace,
+                "provider",
+                connectionStarted,
+                "failed",
+                "provider_connection_failed",
+              );
+              throw error;
+            }
+            if (!modelSession) {
+              throw new ModelProviderError("transport", "Realtime session was not established");
+            }
+
+            const routingStarted = traceStart(trace, "routing");
+            let routingAttempts = 0;
+            let usageResponses = 0;
+            let inputTokens = 0;
+            let outputTokens = 0;
+            let cachedTokens = 0;
+            try {
+              routed = await routeTurn({
+                text: input.text,
+                context: {
+                  activeScenarioIds: state.activeScenarioIds,
+                  slots: state.slots,
+                  ...(state.responseLanguage ? { responseLanguage: state.responseLanguage } : {}),
+                },
+                catalog,
+                session: modelSession,
+                signal,
+                onAttempt: (attempt) => {
+                  routingAttempts = attempt;
+                },
+                onUsage: (usage) => {
+                  usageResponses += 1;
+                  inputTokens += usage.inputTokens;
+                  outputTokens += usage.outputTokens;
+                  cachedTokens += usage.cachedTokens;
+                },
+              });
+              traceEnd(
+                trace,
+                "routing",
+                routingStarted,
+                "completed",
+                `${catalog.promptHash.slice(0, 12)}; attempts=${routingAttempts}${
+                  usageResponses
+                    ? `; input_tokens=${inputTokens}; output_tokens=${outputTokens}; cached_tokens=${cachedTokens}`
+                    : ""
+                }`,
+              );
+            } catch (error) {
+              traceEnd(
+                trace,
+                "routing",
+                routingStarted,
+                "failed",
+                `routing_failed; attempts=${routingAttempts}`,
+              );
+              throw error;
+            }
+
+            // A cancelled voice turn must not commit slots or scenario context.
+            const candidateState = {
+              ...state,
+              activeScenarioIds: [...state.activeScenarioIds],
+              slots: { ...state.slots },
+            };
+            const planningStarted = traceStart(trace, "planning");
+            signal.throwIfAborted();
+            plan = buildTurnPlan({
+              decision: routed.decision,
+              responseLanguage: routed.responseLanguage,
               catalog,
-              session: modelSession,
-              signal,
+              state: candidateState,
             });
-            traceEnd(
+            traceEnd(trace, "planning", planningStarted, "completed", plan.outcome);
+
+            const answerStarted = traceStart(trace, "answer");
+            let answer: string;
+            try {
+              const soleIntent =
+                plan.orderedScenarioIds.length === 1 ? plan.orderedScenarioIds[0] : undefined;
+              const catalogAnswer =
+                plan.outcome === "clarify" &&
+                !plan.orderedScenarioIds.some(
+                  (id) => catalog.scenarioById.get(id)?.priority === "urgent",
+                )
+                  ? plan.nextQuestion
+                  : (soleIntent === "SYS_GOODBYE" && plan.outcome === "goodbye") ||
+                      (soleIntent === "SYS_OUT_OF_SCOPE" && plan.outcome === "out_of_scope")
+                    ? catalog.systemIntentById.get(soleIntent)?.response[routed.responseLanguage]
+                    : undefined;
+              if (catalogAnswer) {
+                answer = catalogAnswer;
+                traceEnd(trace, "answer", answerStarted, "completed", "catalog");
+              } else {
+                answer = await modelSession.generateText({
+                  instructions: answerInstructions(routed.responseLanguage, plan.outcome),
+                  text: responseContext(catalog, candidateState, plan, input.text),
+                  signal,
+                });
+                traceEnd(trace, "answer", answerStarted, "completed", "model");
+              }
+            } catch (error) {
+              traceEnd(trace, "answer", answerStarted, "failed", "answer_failed");
+              throw error;
+            }
+
+            signal.throwIfAborted();
+            const result = turnResultSchema.parse({
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              selectedText: input.text,
+              source: input.source,
+              ...(input.stt ? { stt: input.stt } : {}),
+              detectedLanguage: routed.decision.language,
+              responseLanguage: routed.responseLanguage,
+              decision: routed.decision,
+              plan,
+              answer,
+              status: "completed",
               trace,
-              "routing",
-              routingStarted,
-              "completed",
-              catalog.promptHash.slice(0, 12),
-            );
-          } catch (error) {
-            traceEnd(trace, "routing", routingStarted, "failed", "routing_failed");
-            throw error;
-          }
-
-          const planningStarted = traceStart(trace, "planning");
-          plan = buildTurnPlan({
-            decision: routed.decision,
-            responseLanguage: routed.responseLanguage,
-            catalog,
-            state,
-          });
-          traceEnd(trace, "planning", planningStarted, "completed", plan.outcome);
-
-          const answerStarted = traceStart(trace, "answer");
-          let answer: string;
-          try {
-            answer = await modelSession.generateText({
-              instructions: answerInstructions(routed.responseLanguage, plan.outcome),
-              text: responseContext(catalog, state, plan, input.text),
-              signal,
             });
-            traceEnd(trace, "answer", answerStarted, "completed");
+            Object.assign(state, candidateState);
+            completed = true;
+            return result;
           } catch (error) {
-            traceEnd(trace, "answer", answerStarted, "failed", "answer_failed");
-            throw error;
+            const status =
+              error instanceof ModelProviderError &&
+              (error.kind === "unavailable" || error.kind === "transport")
+                ? "unavailable"
+                : "failed";
+            return failedResult(input, trace, status, {
+              ...(routed
+                ? { decision: routed.decision, responseLanguage: routed.responseLanguage }
+                : {}),
+              ...(plan ? { plan } : {}),
+            });
+          } finally {
+            if (!completed && modelSession) {
+              modelSession.close();
+              if (runtime.modelSession === modelSession) {
+                runtime.modelSession = undefined;
+                runtime.modelSessionOpenedAt = undefined;
+              }
+            }
           }
-
-          return turnResultSchema.parse({
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            selectedText: input.text,
-            source: input.source,
-            ...(input.stt ? { stt: input.stt } : {}),
-            detectedLanguage: routed.decision.language,
-            responseLanguage: routed.responseLanguage,
-            decision: routed.decision,
-            plan,
-            answer,
-            status: "completed",
-            trace,
-          });
-        } catch (error) {
-          const status =
-            error instanceof ModelProviderError &&
-            (error.kind === "unavailable" || error.kind === "transport")
-              ? "unavailable"
-              : "failed";
-          return failedResult(input, trace, status, {
-            ...(routed
-              ? { decision: routed.decision, responseLanguage: routed.responseLanguage }
-              : {}),
-            ...(plan ? { plan } : {}),
-          });
-        } finally {
-          modelSession?.close();
-        }
-      });
+        },
+        turnSignal,
+      );
     },
 
     resetSession(sessionId) {

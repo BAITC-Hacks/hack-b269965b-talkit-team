@@ -36,10 +36,20 @@
 - `pnpm run smoke:built` — успешно: health, echo, JSON 404, voice-router unavailable path, reset, SPA и assets.
 - Поиск запрещённого имени по tracked/untracked файлам — совпадений нет.
 
+## Проверки после появления параллельных voice-файлов
+
+- `pnpm run verify` запускался повторно: `doctor` прошёл, затем общий `format:check` остановился на параллельно появившихся voice/UI-файлах вне Phase 1 diff. Эти файлы не переформатировались без согласования.
+- Отдельный `pnpm run check` на текущем совместном дереве прошёл: typecheck и 56 тестов.
+- Повторные `pnpm run build` и `pnpm run smoke:built` прошли.
+- `docker build -t hack-b269965b-talkit-team:phase1-local .` прошёл; внутри image снова прошли typecheck, 56 тестов и build.
+- Временный runtime-контейнер без ключа прошёл health/echo/404 smoke, `POST /api/voice-router/turn` со статусом `unavailable` и `POST /api/voice-router/reset`; после проверки контейнер остановлен и удалён через `--rm`.
+- `node --check` для eval/smoke runners, `git diff --check` и повторный поиск запрещённого имени прошли без замечаний.
+
 ## Не проверено
 
-- `OPENAI_API_KEY` отсутствует и локального `.env` нет. Live WebSocket-соединение, первый `gpt-realtime` маршрут и eval не запускались; метрики не получены.
+- На момент первоначальной записи ключ и `.env` отсутствовали. После команды «Продолжай» `.env` и непустой `OPENAI_API_KEY` обнаружены без чтения/вывода значения, но live WebSocket-соединение и eval не запускались без явного разрешения расходовать API quota; метрики не получены.
 - Интерактивный браузерный прогон не выполнялся; UI проверен SSR-тестом и production build.
+- После фиксации Phase 1 началась внешняя незавершённая voice/UI-реорганизация. На последнем снимке общий `pnpm run check` останавливается в `src/server/features/voice/yandex-grpc.ts` из-за ещё не добавленных `@grpc/grpc-js`/`@grpc/proto-loader` и связанных типов; это не исправлялось в рамках Phase 1.
 - STT, TTS, VAD, browser calling и действия относятся к следующим фазам и не реализованы.
 - Разрешение организатора на pre-existing starter остаётся в состоянии, указанном в compliance-документах.
 
@@ -49,4 +59,4 @@
 
 ## Полный verify
 
-Ожидает запуска после обновления документации.
+Не завершён: общий format-check блокируют параллельно созданные voice/UI-файлы, а их последующая незавершённая gRPC-правка ломает текущий общий typecheck. Для зафиксированного Phase 1 состояния тесты, build, built smoke и Docker runtime smoke прошли отдельно; это не выдаётся за успешный полный `verify` текущего рабочего дерева.

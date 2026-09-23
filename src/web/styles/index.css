@@ -4,6 +4,9 @@
 
 @theme inline {
   --color-background: #f7f8fc;
+  --color-foreground: #171717;
+  --color-card: #fff;
+  --color-card-foreground: #171717;
   --color-primary: var(--brand);
   --color-primary-foreground: #fff;
   --color-secondary: #eef0f5;
@@ -14,5 +17,6 @@
   --color-ring: var(--focus);
   --color-accent: #eef0f5;
   --color-accent-foreground: #171717;
+  --color-muted: #eef0f5;
   --color-muted-foreground: var(--muted);
 }

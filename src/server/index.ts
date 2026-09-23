@@ -30,6 +30,7 @@ function shutdown() {
   if (closing) return;
   closing = true;
   const timer = setTimeout(() => process.exit(1), 5000).unref();
+  server.closeVoiceSessions();
   server.close(() => {
     clearTimeout(timer);
     process.exit(0);

@@ -72,17 +72,21 @@ export function buildTurnPlan(input: {
   const slotQuestion = firstMissingSlot
     ? catalog.slotByName.get(firstMissingSlot)?.prompt[responseLanguage]
     : undefined;
-  const optionIds = [orderedScenarioIds[0], decision.alternatives[0]?.scenario_id].filter(
-    (id): id is string => Boolean(id),
-  );
-  const optionNames = optionIds.map(
-    (id) =>
-      catalog.scenarioById.get(id)?.name ?? catalog.systemIntentById.get(id)?.description ?? id,
-  );
-  const unclearResponse = catalog.systemIntentById
-    .get("SYS_UNCLEAR")
-    ?.response[responseLanguage].replace("{option_a}", optionNames[0] ?? "первый вариант")
-    .replace("{option_b}", optionNames[1] ?? "другой вопрос");
+  const optionExamples = [
+    ...orderedScenarioIds,
+    ...decision.alternatives.map((item) => item.scenario_id),
+  ]
+    .map((id) => catalog.scenarioById.get(id)?.examples[responseLanguage][0]?.trim())
+    .filter((example): example is string => Boolean(example))
+    .slice(0, 2);
+  const unclearResponse =
+    optionExamples.length === 2
+      ? responseLanguage === "kk"
+        ? `Нақтылап жіберіңізші, қай сұрақ жақынырақ: «${optionExamples[0]}» әлде «${optionExamples[1]}»?`
+        : `Уточните, пожалуйста, какой запрос ближе: «${optionExamples[0]}» или «${optionExamples[1]}»?`
+      : responseLanguage === "kk"
+        ? "Нақтылап жіберіңізші, сақтандыру бойынша қандай сұрағыңыз бар?"
+        : "Уточните, пожалуйста, с каким вопросом по страхованию я могу помочь?";
   const nextQuestion =
     outcome === "clarify" ? unclearResponse : outcome === "respond" ? slotQuestion : undefined;
   const knowledgeRefs = getKnowledgeFacts(orderedScenarioIds, catalog).map((fact) => fact.ref);

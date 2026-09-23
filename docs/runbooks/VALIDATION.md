@@ -32,6 +32,15 @@ pnpm run smoke:built
 
 Unit-тесты, типы и сборка должны быть отделены от платных API. Тестовый адаптер обозначается как fake/mock, не как проверенный провайдер.
 
+Live-eval Phase 1 выполняет реальные запросы и запускается отдельно только при настроенном server-only ключе и разрешении расходовать quota:
+
+```sh
+pnpm run eval:router
+python data/voice-router/evaluate.py artifacts/router-eval/predictions.json data/voice-router/dev_utterances.json
+```
+
+Runner сохраняет `predictions.json`, обезличенные `details.jsonl` и `run.json` с моделью и prompt hash в `artifacts/router-eval/`. Наличие runner-а без фактического запуска не считается результатом eval.
+
 Для маршрутизатора запускай реально реализованный eval runner по [фазе 5](../implementation/phases/05_EVALUATION.md). Сохраняй predictions, вывод исходного evaluator, модель/конфигурацию и версию кода/промпта. Разметку expected не передавай в runtime.
 
 Отдельно проверяй многоходовые диалоги и реальный голос на русском, казахском и смешанной речи. Текстовый eval не подтверждает микрофон, DSR, воспроизведение или сквозную задержку.

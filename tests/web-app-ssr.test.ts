@@ -21,11 +21,17 @@ test("App.vue compiles and renders the voice router initial state", async () => 
     const html = await renderToString(createSSRApp(module.default));
 
     assert.match(html, /Проверяем API/);
-    assert.match(html, /Один вход/);
-    assert.match(html, /Сообщение клиента/);
-    assert.match(html, /<textarea\b[^>]*\brows="6"[^>]*\baria-describedby="router-help"/);
-    assert.match(html, /<button\b[^>]*\btype="submit"[^>]*\baria-busy="false"/);
-    assert.match(html, /Здесь появятся ответ, причины выбора, альтернативы и измеренное время/);
+    assert.match(html, /Голосовой оператор/);
+    assert.match(html, /aria-label="Позвонить"/);
+    assert.match(html, /aria-pressed="false"/);
+    assert.match(html, /data-active="false"/);
+    assert.doesNotMatch(html, /Ключ голосового доступа/);
+    assert.doesNotMatch(html, /Закончить реплику<\/button>/);
+    assert.match(html, /Резервный текстовый канал/);
+    assert.match(html, /<textarea\b[^>]*\brows="3"/);
+    assert.match(html, /После отправки здесь появятся реплика и фактический ответ маршрутизатора/);
+    assert.match(html, /Router trace/);
+    assert.match(html, /TTS first/);
   } finally {
     await server.close();
   }

@@ -48,7 +48,7 @@ test("ElevenLabs TTS streams V3 PCM16 with aligned chunks and truthful duration"
   });
   assert.deepEqual(
     received.map((chunk) => chunk.length),
-    [8_000, 2],
+    [1_600, 6_402],
   );
   assert.deepEqual(Buffer.concat(received), Buffer.from(bytes));
   assert.deepEqual(result.format, { encoding: "pcm16", sampleRateHz: 16_000, channels: 1 });

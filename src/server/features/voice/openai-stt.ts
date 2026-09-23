@@ -2,7 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import WebSocket, { type RawData } from "ws";
 
 export type OpenAiSttEvent =
-  | { type: "speech_started" | "speech_stopped"; utteranceId?: string; audioMs?: number; at: number }
+  | {
+      type: "speech_started" | "speech_stopped";
+      utteranceId?: string;
+      audioMs?: number;
+      at: number;
+    }
   | {
       type: "partial" | "final";
       utteranceId?: string;
@@ -45,7 +50,10 @@ function confidenceFromLogprobs(value: unknown): number | null {
     )
     .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
   if (scores.length === 0) return null;
-  return Math.min(1, Math.max(0, Math.exp(scores.reduce((sum, score) => sum + score, 0) / scores.length)));
+  return Math.min(
+    1,
+    Math.max(0, Math.exp(scores.reduce((sum, score) => sum + score, 0) / scores.length)),
+  );
 }
 
 export function createOpenAiStt(config: OpenAiSttConfig) {
@@ -115,7 +123,9 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
       case "conversation.item.input_audio_transcription.completed": {
         const key = id ?? "active";
         const text =
-          typeof event.transcript === "string" ? event.transcript.trim() : partials.get(key)?.trim() ?? "";
+          typeof event.transcript === "string"
+            ? event.transcript.trim()
+            : (partials.get(key)?.trim() ?? "");
         partials.delete(key);
         config.onEvent({
           type: "final",
@@ -137,10 +147,30 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
   }
 
   function startConverter() {
-    const process = spawn(config.ffmpegPath ?? "ffmpeg", [
-      "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", "16000", "-ac", "1",
-      "-i", "pipe:0", "-f", "s16le", "-ar", "24000", "-ac", "1", "pipe:1",
-    ], { windowsHide: true });
+    const process = spawn(
+      config.ffmpegPath ?? "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        "-f",
+        "s16le",
+        "-ar",
+        "24000",
+        "-ac",
+        "1",
+        "pipe:1",
+      ],
+      { windowsHide: true },
+    );
     converter = process;
     process.on("error", () => fail());
     process.on("exit", () => {
@@ -151,7 +181,11 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
       const joined = oddPcmByte ? Buffer.concat([oddPcmByte, value]) : value;
       const length = joined.length - (joined.length % 2);
       oddPcmByte = length < joined.length ? Buffer.from(joined.subarray(length)) : undefined;
-      if (length) send({ type: "input_audio_buffer.append", audio: joined.subarray(0, length).toString("base64") });
+      if (length)
+        send({
+          type: "input_audio_buffer.append",
+          audio: joined.subarray(0, length).toString("base64"),
+        });
     });
     process.stderr.resume();
   }
@@ -196,7 +230,6 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
             type: "session.update",
             session: {
               type: "transcription",
-              include: ["item.input_audio_transcription.logprobs"],
               audio: {
                 input: {
                   format: { type: "audio/pcm", rate: 24000 },
@@ -238,7 +271,10 @@ export function createOpenAiStt(config: OpenAiSttConfig) {
       fail();
       return false;
     }
-    return converter.stdin.write(audio);
+    // Node's false return value means the frame was accepted into its buffer.
+    // The bounded writableLength check above is the actual overload guard.
+    converter.stdin.write(audio);
+    return true;
   }
 
   function commit(): void {

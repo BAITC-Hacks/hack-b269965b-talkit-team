@@ -15,6 +15,15 @@ const responseDoneSchema = z.looseObject({
     status: z.string(),
     metadata: z.record(z.string(), z.string()).nullish(),
     output: z.array(z.unknown()),
+    usage: z
+      .looseObject({
+        input_tokens: z.number().nonnegative(),
+        output_tokens: z.number().nonnegative(),
+        input_token_details: z
+          .looseObject({ cached_tokens: z.number().nonnegative().optional() })
+          .nullish(),
+      })
+      .nullish(),
   }),
 });
 const functionCallSchema = z.looseObject({
@@ -52,6 +61,8 @@ async function openSocket(config: OpenAiRealtimeConfig, signal?: AbortSignal) {
     headers: { Authorization: `Bearer ${config.apiKey}` },
     maxPayload: 1_048_576,
   });
+  // ws can emit an error after an aborted CONNECTING socket has removed its startup listeners.
+  socket.on("error", () => {});
   const timeoutMs = config.requestTimeoutMs ?? 15_000;
 
   await new Promise<void>((resolve, reject) => {
@@ -124,6 +135,12 @@ async function createSession(
   const { socket, timeoutMs } = await openSocket(config, initialSignal);
   let closed = false;
   let pending = false;
+  socket.on("error", () => {
+    closed = true;
+  });
+  socket.on("close", () => {
+    closed = true;
+  });
 
   async function request(
     response: Record<string, unknown>,
@@ -139,7 +156,7 @@ async function createSession(
 
     return await new Promise<ResponseDone>((resolve, reject) => {
       const timer = setTimeout(
-        () => fail(providerError("transport", "Realtime response timed out"), true),
+        () => fail(providerError("transport", "Realtime response timed out")),
         timeoutMs,
       );
       const cleanup = () => {
@@ -150,11 +167,10 @@ async function createSession(
         socket.off("close", onClose);
         signal?.removeEventListener("abort", onAbort);
       };
-      const fail = (error: Error, cancel = false) => {
-        if (cancel && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "response.cancel" }));
-        }
+      const fail = (error: Error) => {
         cleanup();
+        closed = true;
+        socket.close();
         reject(error);
       };
       const onError = (error: Error) =>
@@ -162,7 +178,7 @@ async function createSession(
       const onClose = () =>
         fail(providerError("transport", "Realtime connection closed before completion"));
       const onAbort = () =>
-        fail(providerError("transport", "Realtime response was cancelled", signal?.reason), true);
+        fail(providerError("transport", "Realtime response was cancelled", signal?.reason));
       const onMessage = (data: RawData) => {
         let event: unknown;
         try {
@@ -218,6 +234,9 @@ async function createSession(
   }
 
   return {
+    isOpen() {
+      return !closed && socket.readyState === WebSocket.OPEN;
+    },
     async callFunction(input: {
       instructions: string;
       text: string;
@@ -248,7 +267,19 @@ async function createSession(
       }
       const call = calls[0];
       if (!call) throw new ModelProviderError("output", "Realtime function call is missing");
-      return { name: call.name, arguments: call.arguments };
+      return {
+        name: call.name,
+        arguments: call.arguments,
+        ...(response.usage
+          ? {
+              usage: {
+                inputTokens: response.usage.input_tokens,
+                outputTokens: response.usage.output_tokens,
+                cachedTokens: response.usage.input_token_details?.cached_tokens ?? 0,
+              },
+            }
+          : {}),
+      };
     },
 
     async generateText(input: {

@@ -68,11 +68,9 @@ export class StreamingPcm16Encoder {
   #emitCompleteFrames(): void {
     while (this.#pending.length >= this.#frameSamples) {
       const samples = this.#pending.splice(0, this.#frameSamples);
-      const data = new ArrayBuffer(samples.length * 2);
+      const data = new ArrayBuffer(this.#frameSamples * 2);
       const view = new DataView(data);
-      for (let index = 0; index < samples.length; index += 1) {
-        view.setInt16(index * 2, samples[index]!, true);
-      }
+      samples.forEach((sample, index) => view.setInt16(index * 2, sample, true));
       this.#onFrame(data);
       this.#stats.emittedFrames += 1;
       this.#stats.emittedBytes += data.byteLength;
@@ -102,14 +100,27 @@ export class PcmMicrophoneCapture {
   start(): Promise<void> {
     if (this.#starting) return this.#starting;
     if (this.active) {
-      return Promise.reject(
-        new RealtimeClientError("INVALID_STATE", "Microphone capture is already active"),
-      );
+      if (this.#worklet) {
+        return Promise.reject(
+          new RealtimeClientError("INVALID_STATE", "Microphone capture is already active"),
+        );
+      }
+      const generation = ++this.#generation;
+      const pending = this.#resume(generation)
+        .catch(async (cause: unknown) => {
+          if (generation === this.#generation) await this.stop();
+          throw cause;
+        })
+        .finally(() => {
+          if (this.#starting === pending) this.#starting = undefined;
+        });
+      this.#starting = pending;
+      return this.#starting;
     }
-    const generation = ++this.#generation;
-    this.#starting = this.#start(generation).finally(() => {
-      this.#starting = undefined;
+    const pending = this.#start(++this.#generation).finally(() => {
+      if (this.#starting === pending) this.#starting = undefined;
     });
+    this.#starting = pending;
     return this.#starting;
   }
 
@@ -126,15 +137,19 @@ export class PcmMicrophoneCapture {
         },
       });
     } catch (cause) {
+      if (generation !== this.#generation) {
+        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone start was cancelled", {
+          recoverable: true,
+        });
+      }
       throw new RealtimeClientError("MICROPHONE_DENIED", "Microphone access was not granted", {
         recoverable: true,
         cause,
       });
     }
-
     if (generation !== this.#generation) {
-      for (const track of stream.getTracks()) track.stop();
-      throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone startup was cancelled", {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone start was cancelled", {
         recoverable: true,
       });
     }
@@ -147,47 +162,24 @@ export class PcmMicrophoneCapture {
         this.#options.workletUrl ?? new URL("./pcm-capture.worklet.js", import.meta.url),
       );
       if (generation !== this.#generation) {
-        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone startup was cancelled", {
+        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone start was cancelled", {
           recoverable: true,
         });
       }
       await context.resume();
       if (generation !== this.#generation) {
-        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone startup was cancelled", {
+        throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone start was cancelled", {
           recoverable: true,
         });
       }
-      this.#encoder = new StreamingPcm16Encoder(
-        context.sampleRate,
-        this.#options.format,
-        this.#options.onFrame,
-      );
       this.#source = context.createMediaStreamSource(this.#stream);
-      this.#worklet = new AudioWorkletNode(context, "voice-router-pcm-capture", {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        outputChannelCount: [1],
-      });
       this.#sink = context.createGain();
       this.#sink.gain.value = 0;
-      this.#worklet.port.onmessage = (event: MessageEvent<unknown>) => {
-        if (!(event.data instanceof Float32Array)) return;
-        try {
-          this.#encoder?.push(event.data);
-        } catch (cause) {
-          this.#options.onError(
-            cause instanceof RealtimeClientError
-              ? cause
-              : new RealtimeClientError("CAPTURE_FAILED", "Audio capture failed", { cause }),
-          );
-        }
-      };
-      this.#source.connect(this.#worklet);
-      this.#worklet.connect(this.#sink);
       this.#sink.connect(context.destination);
+      await this.#resume(generation);
     } catch (cause) {
-      await this.#cleanup();
-      if (cause instanceof RealtimeClientError) throw cause;
+      if (generation === this.#generation) await this.stop();
+      if (cause instanceof RealtimeClientError && cause.code === "TURN_INTERRUPTED") throw cause;
       throw new RealtimeClientError("CAPTURE_FAILED", "Could not start PCM audio capture", {
         recoverable: true,
         cause,
@@ -195,30 +187,87 @@ export class PcmMicrophoneCapture {
     }
   }
 
-  async stop(): Promise<PcmCaptureStats> {
-    ++this.#generation;
-    return this.#cleanup();
+  async #resume(generation: number): Promise<void> {
+    const context = this.#context;
+    const source = this.#source;
+    const sink = this.#sink;
+    if (!context || !source || !sink || generation !== this.#generation) {
+      throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone capture is unavailable", {
+        recoverable: true,
+      });
+    }
+    if (context.state === "suspended") await context.resume();
+    if (generation !== this.#generation) {
+      throw new RealtimeClientError("TURN_INTERRUPTED", "Microphone start was cancelled", {
+        recoverable: true,
+      });
+    }
+    const encoder = new StreamingPcm16Encoder(
+      context.sampleRate,
+      this.#options.format,
+      this.#options.onFrame,
+    );
+    const worklet = new AudioWorkletNode(context, "voice-router-pcm-capture", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    this.#encoder = encoder;
+    this.#worklet = worklet;
+    worklet.port.onmessage = (event: MessageEvent<unknown>) => {
+      if (this.#worklet !== worklet || !(event.data instanceof Float32Array)) return;
+      try {
+        encoder.push(event.data);
+      } catch (cause) {
+        this.#options.onError(
+          cause instanceof RealtimeClientError
+            ? cause
+            : new RealtimeClientError("CAPTURE_FAILED", "Audio capture failed", { cause }),
+        );
+      }
+    };
+    source.connect(worklet);
+    worklet.connect(sink);
   }
 
-  async #cleanup(): Promise<PcmCaptureStats> {
+  async pause(): Promise<PcmCaptureStats> {
     const stats = this.#encoder?.finish() ?? {
       emittedFrames: 0,
       emittedBytes: 0,
       droppedSamples: 0,
     };
-    if (this.#worklet) this.#worklet.port.onmessage = null;
+    const worklet = this.#worklet;
+    this.#encoder = undefined;
+    this.#worklet = undefined;
+    if (worklet) worklet.port.onmessage = null;
     this.#source?.disconnect();
-    this.#worklet?.disconnect();
+    worklet?.disconnect();
+    if (this.#starting && !worklet) {
+      // A permission prompt or worklet load was interrupted before capture became usable.
+      this.#generation += 1;
+      this.#starting = undefined;
+      await this.#releaseMedia();
+    }
+    return stats;
+  }
+
+  async stop(): Promise<PcmCaptureStats> {
+    this.#generation += 1;
+    this.#starting = undefined;
+    const stats = await this.pause();
+    await this.#releaseMedia();
+    return stats;
+  }
+
+  async #releaseMedia(): Promise<void> {
+    this.#source?.disconnect();
     this.#sink?.disconnect();
     for (const track of this.#stream?.getTracks() ?? []) track.stop();
     const context = this.#context;
     this.#stream = undefined;
     this.#source = undefined;
-    this.#worklet = undefined;
     this.#sink = undefined;
-    this.#encoder = undefined;
     this.#context = undefined;
-    if (context && context.state !== "closed") await context.close();
-    return stats;
+    if (context && context.state !== "closed") await context.close().catch(() => undefined);
   }
 }

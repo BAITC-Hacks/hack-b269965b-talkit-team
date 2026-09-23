@@ -2,7 +2,11 @@ import { createServer } from "node:http";
 import { toNodeListener } from "h3";
 import sirv from "sirv";
 import { createApi } from "./app.ts";
-import type { VoiceRouterController } from "./features/voice-router/controller.ts";
+import {
+  createDefaultVoiceRouterController,
+  type VoiceRouterController,
+} from "./features/voice-router/controller.ts";
+import { attachVoiceRouterSocket } from "./features/voice/transport.ts";
 
 export function createHttpServer(options: {
   appName: string;
@@ -10,7 +14,9 @@ export function createHttpServer(options: {
   logRequests?: boolean;
   voiceRouterController?: VoiceRouterController;
 }) {
-  const api = toNodeListener(createApi(options));
+  const controller =
+    options.voiceRouterController ?? createDefaultVoiceRouterController(process.env);
+  const api = toNodeListener(createApi({ ...options, voiceRouterController: controller }));
   const staticFiles = options.webRoot
     ? sirv(options.webRoot, {
         single: true,
@@ -22,7 +28,7 @@ export function createHttpServer(options: {
         },
       })
     : undefined;
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     const rawUrl = req.url ?? "/";
     let pathname: string;
     try {
@@ -67,4 +73,6 @@ export function createHttpServer(options: {
     });
     res.end("Not found. In development open the Vite port, not the API port.");
   });
+  const closeVoiceSessions = attachVoiceRouterSocket(server, controller, process.env);
+  return Object.assign(server, { closeVoiceSessions });
 }

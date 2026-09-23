@@ -7,9 +7,15 @@ export interface FunctionTool {
 export interface FunctionCallResult {
   name: string;
   arguments: string;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+  };
 }
 
 export interface VoiceRouterModelSession {
+  isOpen?(): boolean;
   callFunction(input: {
     instructions: string;
     text: string;

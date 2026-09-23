@@ -5,7 +5,12 @@ import {
   type RouteDecision,
 } from "../../../shared/voice-router.ts";
 import { parseCatalogRouteDecision, type VoiceRouterCatalog } from "./catalog.ts";
-import { ModelProviderError, type FunctionTool, type VoiceRouterModelSession } from "./model.ts";
+import {
+  ModelProviderError,
+  type FunctionCallResult,
+  type FunctionTool,
+  type VoiceRouterModelSession,
+} from "./model.ts";
 
 const routeOutputSchema = routeDecisionSchema.extend({ response_language: responseLanguageSchema });
 
@@ -105,19 +110,24 @@ export async function routeTurn(input: {
   catalog: VoiceRouterCatalog;
   session: VoiceRouterModelSession;
   signal?: AbortSignal;
+  onAttempt?: (attempt: number) => void;
+  onUsage?: (usage: NonNullable<FunctionCallResult["usage"]>) => void;
 }): Promise<RoutingResult> {
   const tool = createRouteTool(input.catalog);
+  let attempts = 0;
   const payload = JSON.stringify({
     user_text: input.text,
     session_context: input.context,
   });
   const attempt = async (instructions: string) => {
+    input.onAttempt?.(++attempts);
     const call = await input.session.callFunction({
       instructions,
       text: payload,
       tool,
       ...(input.signal ? { signal: input.signal } : {}),
     });
+    if (call.usage) input.onUsage?.(call.usage);
     return parseFunctionCall(call, input.catalog);
   };
 

@@ -25,6 +25,7 @@ docker compose logs --tail=50 app
 
 Compose привязывает опубликованный порт к localhost. Для публичного демо настройте HTTPS reverse proxy / managed hosting,
 не открывайте Docker socket и не публикуйте .env. Домен, TLS и доступ проверьте заранее; конкурсный код выкладывайте по правилам.
+Голосовой WebSocket не требует кода доступа в интерфейсе; проверка `Origin` и ограничения на соединения/аудио не заменяют аутентификацию. При публичном развёртывании ограничьте доступ и расходы снаружи приложения: голосовой канал использует платные STT/TTS, а текстовый `/api/voice-router/turn` — платный LLM при настроенном ключе. Не открывайте эти пути для неограниченного использования.
 
 На Node-хостинге: build `pnpm install --frozen-lockfile && pnpm run check && pnpm run build`,
 start `node dist/server/index.js`. Env: NODE_ENV=production, HOST=0.0.0.0, PORT выданный хостингом.
