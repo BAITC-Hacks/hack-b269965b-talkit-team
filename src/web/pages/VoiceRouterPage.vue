@@ -24,7 +24,7 @@ watch(result, () => {
   latestChannel.value = "text";
 });
 
-function onVoiceTurnCompleted(value: Readonly<Record<string, unknown>>): void {
+function onVoiceResultUpdated(value: Readonly<Record<string, unknown>>): void {
   voiceResult.value = value;
   latestChannel.value = "voice";
 }
@@ -115,7 +115,7 @@ function formatConfidence(value: number): string {
 
       <div class="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div class="flex min-w-0 flex-col gap-5">
-          <VoiceCallPanel @turn-completed="onVoiceTurnCompleted" />
+          <VoiceCallPanel @result-updated="onVoiceResultUpdated" />
           <VoiceChatPanel :controller="controller" />
         </div>
 

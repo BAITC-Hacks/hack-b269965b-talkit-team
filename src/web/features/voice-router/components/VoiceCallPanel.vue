@@ -19,7 +19,7 @@ import {
 } from "../realtime/index.ts";
 
 const emit = defineEmits<{
-  turnCompleted: [result: Readonly<Record<string, unknown>>];
+  resultUpdated: [result: Readonly<Record<string, unknown>>];
 }>();
 
 const audioLevel = ref(0);
@@ -40,7 +40,7 @@ onMounted(() => {
     if (value.state !== "recording") audioLevel.value = 0;
     if (value.lastTurnResult && value.lastTurnResult !== lastEmittedResult) {
       lastEmittedResult = value.lastTurnResult;
-      emit("turnCompleted", value.lastTurnResult);
+      emit("resultUpdated", value.lastTurnResult);
     }
   });
 });

@@ -128,6 +128,22 @@ function sameFormat(left: PcmAudioFormat, right: PcmAudioFormat): boolean {
   );
 }
 
+function deepFreeze<T>(value: T): Readonly<T> {
+  if (typeof value !== "object" || value === null) return value;
+  const pending: object[] = [value];
+  const seen = new WeakSet<object>();
+  while (pending.length > 0) {
+    const value = pending.pop()!;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    for (const nested of Object.values(value)) {
+      if (nested !== null && typeof nested === "object") pending.push(nested);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export class RealtimeVoiceClient {
   readonly #options: RealtimeVoiceClientOptions;
   readonly #listeners = new Set<(snapshot: RealtimeVoiceSnapshot) => void>();
@@ -491,6 +507,21 @@ export class RealtimeVoiceClient {
       this.#setSnapshot({ dsrResolution: message });
       return;
     }
+    if (message.type === "route.completed") {
+      if (
+        this.#turnCompleted ||
+        message.payload.result.sessionId !== message.sessionId ||
+        message.payload.result.turnId !== message.turnId
+      )
+        return;
+      this.#setSnapshot({
+        lastTurnResult: deepFreeze(
+          structuredClone({ ...message.payload.result, tts: { status: "pending" } }),
+        ),
+        lastResponseDelivery: { turnId: message.turnId, status: "pending" },
+      });
+      return;
+    }
     if (message.type === "audio.ready") {
       if (!sameFormat(message.payload.audioFormat, this.#audioFormat)) {
         this.#rejectAudioReady(
@@ -583,7 +614,7 @@ export class RealtimeVoiceClient {
         }
       }
       this.#setSnapshot({
-        lastTurnResult: Object.freeze({ ...message.payload.result }),
+        lastTurnResult: deepFreeze(structuredClone(message.payload.result)),
         lastCompletedSttHypotheses: this.#snapshot.sttHypotheses.filter(
           (hypothesis) => hypothesis.turnId === message.turnId,
         ),
